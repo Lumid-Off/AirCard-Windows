@@ -1,0 +1,24 @@
+# Rust build artifacts
+target/
+*.pdb
+*.d
+*.rs.bk
+
+# Compiled binaries
+*.exe
+*.dll
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor files
+*.swp
+*~
+.vscode/
+.idea/
+
+# Logs and temp files
+*.log
+*.tmp
