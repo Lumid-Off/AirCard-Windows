@@ -8,6 +8,7 @@ mod apple;
 mod device;
 mod flasher;
 mod image_skin;
+mod i18n;
 mod passthm;
 mod scanner;
 
