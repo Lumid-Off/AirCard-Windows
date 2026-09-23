@@ -9,7 +9,8 @@
 - 🎨 **Custom Card Skins:** Assign custom artwork, textures, or bank logos to Apple Pay and Apple Cash cards.
 - 🔢 **Lock Screen Passcode Themes (.passthm):** Apply custom keypad button artwork from popular Cowabunga & Nugget `.passthm` themes directly to iOS lockscreen.
 - ⚡ **100% Native & Lightweight:** Single standalone `aircard.exe` (~7.5 MB). No Python, no Flet, no webview, no bloated runtimes.
-- 🪟 **Material Design 3 Interface:** Clean, modern dark theme built with `egui` and `eframe`.
+- 🪟 **Material Design 3 Interface:** System, light, and dark themes, with a configurable text scale for readability.
+- 🌐 **Localized UI:** Platform-neutral language catalogue with System, English, and Japanese choices; the display preference is retained between launches.
 - 📱 **Zero-Hassle Card Detection:** Tap any card in your iPhone's Wallet app while connected to detect its hash in real-time via `syslog_relay`.
 - 📶 **USB & WiFi Transport:** Scan card events and apply Wallet or passcode assets through USB or a paired local WiFi connection.
 - 🔄 **Safe & Reversible:** Complete Books state snapshot and automatic restore engine — preserves original device state.
@@ -22,6 +23,12 @@
 - **Apple Mobile Device Support / 64-bit iTunes** (required for Apple device communication).
 - A Lightning or USB-C cable for the initial trust/pairing setup.
 - For WiFi mode, enable WiFi sync and keep the PC and iPhone on the same local network.
+
+---
+
+## Display, language, and accessibility
+
+Open the **Settings** tab to choose the application language, color theme (**System**, **Light**, or **Dark**), and a text-size multiplier. The layout scrolls horizontally on narrow windows so longer translated labels remain reachable rather than being clipped. UI translations are Fluent resources in `locales/*.ftl`; add a locale file with the same keys when introducing another language.
 
 ---
 

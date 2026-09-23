@@ -5,11 +5,13 @@ use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 
 use eframe::egui;
+use serde::{Deserialize, Serialize};
 
 use crate::apple;
 use crate::device::{ConnectionMode, DeviceInfo, DeviceTransport, list_connected_devices};
 use crate::flasher::{flash_passcode_theme, flash_wallet_skin};
 use crate::image_skin::PreparedSkin;
+use crate::i18n::{AppLanguage, Localizer};
 use crate::passthm::{PasscodeTheme, parse_passthm_file};
 use crate::scanner::{SavedCard, load_saved_cards, scan_syslog_for_cards};
 
@@ -18,6 +20,40 @@ enum AppTab {
     Wallet,
     Passcode,
     Help,
+    Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+enum ThemeMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeMode {
+    const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
+
+    fn dark(self, ctx: &egui::Context) -> bool {
+        match self {
+            Self::System => ctx.system_theme().unwrap_or(egui::Theme::Dark) == egui::Theme::Dark,
+            Self::Light => false,
+            Self::Dark => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DisplaySettings {
+    language: AppLanguage,
+    theme: ThemeMode,
+    text_scale: f32,
+}
+
+impl Default for DisplaySettings {
+    fn default() -> Self {
+        Self { language: AppLanguage::System, theme: ThemeMode::System, text_scale: 1.0 }
+    }
 }
 
 enum BackgroundTaskMessage {
@@ -61,6 +97,8 @@ fn current_timestamp() -> String {
 
 pub struct AirCardApp {
     current_tab: AppTab,
+    display: DisplaySettings,
+    localizer: Localizer,
     apple_status: String,
     apple_ready: bool,
 
@@ -100,7 +138,11 @@ pub struct AirCardApp {
 impl AirCardApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         setup_custom_fonts(&cc.egui_ctx);
-        setup_custom_theme(&cc.egui_ctx);
+        let display = cc.storage
+            .and_then(|storage| eframe::get_value(storage, "aircard_display_settings"))
+            .unwrap_or_default();
+        let localizer = Localizer::new(display.language);
+        setup_custom_theme(&cc.egui_ctx, &display);
 
         let (apple_ready, apple_status) = match apple::verify_support() {
             Ok(msg) => (true, msg),
@@ -109,6 +151,8 @@ impl AirCardApp {
 
         let mut app = Self {
             current_tab: AppTab::Wallet,
+            display,
+            localizer,
             apple_status,
             apple_ready,
 
@@ -150,6 +194,15 @@ impl AirCardApp {
         }
 
         app
+    }
+
+    fn t(&self, key: &str) -> String {
+        self.localizer.text(key)
+    }
+
+    fn apply_display_settings(&mut self, ctx: &egui::Context) {
+        self.localizer = Localizer::new(self.display.language);
+        setup_custom_theme(ctx, &self.display);
     }
 
     fn add_log(&mut self, text: impl AsRef<str>) {
@@ -617,84 +670,106 @@ impl AirCardApp {
 
 pub mod md3 {
     use eframe::egui::Color32;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    // M3 Dark scheme
-    pub const SURFACE: Color32 = Color32::from_rgb(18, 18, 20);
-    pub const SURFACE_CONTAINER: Color32 = Color32::from_rgb(33, 31, 36);
-    pub const SURFACE_CONTAINER_HIGH: Color32 = Color32::from_rgb(43, 41, 48);
-    pub const SURFACE_CONTAINER_HIGHEST: Color32 = Color32::from_rgb(54, 52, 59);
-    pub const ON_SURFACE: Color32 = Color32::from_rgb(230, 225, 229);
-    pub const ON_SURFACE_VARIANT: Color32 = Color32::from_rgb(196, 199, 197);
-    pub const OUTLINE: Color32 = Color32::from_rgb(147, 143, 153);
-    pub const OUTLINE_VARIANT: Color32 = Color32::from_rgb(73, 69, 79);
+    static DARK: AtomicBool = AtomicBool::new(true);
+
+    #[derive(Clone, Copy)]
+    pub struct DynamicColor {
+        dark: Color32,
+        light: Color32,
+    }
+
+    impl DynamicColor {
+        pub const fn new(dark: Color32, light: Color32) -> Self { Self { dark, light } }
+    }
+
+    impl From<DynamicColor> for Color32 {
+        fn from(color: DynamicColor) -> Self {
+            if DARK.load(Ordering::Relaxed) { color.dark } else { color.light }
+        }
+    }
+
+    pub fn set_dark(value: bool) { DARK.store(value, Ordering::Relaxed); }
+
+    pub const SURFACE: DynamicColor = DynamicColor::new(Color32::from_rgb(18, 18, 20), Color32::from_rgb(255, 251, 254));
+    pub const SURFACE_CONTAINER: DynamicColor = DynamicColor::new(Color32::from_rgb(33, 31, 36), Color32::from_rgb(245, 239, 244));
+    pub const SURFACE_CONTAINER_HIGH: DynamicColor = DynamicColor::new(Color32::from_rgb(43, 41, 48), Color32::from_rgb(236, 230, 236));
+    pub const SURFACE_CONTAINER_HIGHEST: DynamicColor = DynamicColor::new(Color32::from_rgb(54, 52, 59), Color32::from_rgb(226, 220, 225));
+    pub const ON_SURFACE: DynamicColor = DynamicColor::new(Color32::from_rgb(230, 225, 229), Color32::from_rgb(29, 27, 32));
+    pub const ON_SURFACE_VARIANT: DynamicColor = DynamicColor::new(Color32::from_rgb(196, 199, 197), Color32::from_rgb(73, 69, 79));
+    pub const OUTLINE: DynamicColor = DynamicColor::new(Color32::from_rgb(147, 143, 153), Color32::from_rgb(121, 116, 126));
+    pub const OUTLINE_VARIANT: DynamicColor = DynamicColor::new(Color32::from_rgb(73, 69, 79), Color32::from_rgb(202, 196, 208));
 
     // Primary
-    pub const PRIMARY: Color32 = Color32::from_rgb(208, 188, 255);
-    pub const ON_PRIMARY: Color32 = Color32::from_rgb(56, 30, 114);
-    pub const PRIMARY_CONTAINER: Color32 = Color32::from_rgb(79, 55, 139);
-    pub const ON_PRIMARY_CONTAINER: Color32 = Color32::from_rgb(234, 221, 255);
+    pub const PRIMARY: DynamicColor = DynamicColor::new(Color32::from_rgb(208, 188, 255), Color32::from_rgb(103, 80, 164));
+    pub const ON_PRIMARY: DynamicColor = DynamicColor::new(Color32::from_rgb(56, 30, 114), Color32::from_rgb(255, 251, 254));
+    pub const PRIMARY_CONTAINER: DynamicColor = DynamicColor::new(Color32::from_rgb(79, 55, 139), Color32::from_rgb(234, 221, 255));
+    pub const ON_PRIMARY_CONTAINER: DynamicColor = DynamicColor::new(Color32::from_rgb(234, 221, 255), Color32::from_rgb(33, 0, 93));
 
     // Secondary
-    pub const SECONDARY_CONTAINER: Color32 = Color32::from_rgb(74, 68, 88);
-    pub const ON_SECONDARY_CONTAINER: Color32 = Color32::from_rgb(232, 222, 248);
+    pub const SECONDARY_CONTAINER: DynamicColor = DynamicColor::new(Color32::from_rgb(74, 68, 88), Color32::from_rgb(232, 222, 248));
+    pub const ON_SECONDARY_CONTAINER: DynamicColor = DynamicColor::new(Color32::from_rgb(232, 222, 248), Color32::from_rgb(29, 25, 43));
 
     // Tertiary
-    pub const TERTIARY_CONTAINER: Color32 = Color32::from_rgb(99, 59, 72);
-    pub const ON_TERTIARY_CONTAINER: Color32 = Color32::from_rgb(255, 216, 228);
+    pub const TERTIARY_CONTAINER: DynamicColor = DynamicColor::new(Color32::from_rgb(99, 59, 72), Color32::from_rgb(255, 216, 228));
+    pub const ON_TERTIARY_CONTAINER: DynamicColor = DynamicColor::new(Color32::from_rgb(255, 216, 228), Color32::from_rgb(49, 17, 29));
 
     // Error
-    pub const ERROR: Color32 = Color32::from_rgb(242, 184, 181);
-    pub const ERROR_CONTAINER: Color32 = Color32::from_rgb(140, 29, 24);
+    pub const ERROR: DynamicColor = DynamicColor::new(Color32::from_rgb(242, 184, 181), Color32::from_rgb(186, 26, 26));
+    pub const ERROR_CONTAINER: DynamicColor = DynamicColor::new(Color32::from_rgb(140, 29, 24), Color32::from_rgb(255, 218, 214));
 
     // Extra
-    pub const SUCCESS: Color32 = Color32::from_rgb(120, 220, 120);
+    pub const SUCCESS: DynamicColor = DynamicColor::new(Color32::from_rgb(120, 220, 120), Color32::from_rgb(20, 120, 60));
 }
 
-fn draw_status_dot(ui: &mut egui::Ui, color: egui::Color32) {
+fn draw_status_dot(ui: &mut egui::Ui, color: impl Into<egui::Color32>) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), 4.0, color);
+    ui.painter().circle_filled(rect.center(), 4.0, color.into());
 }
 
 fn setup_custom_fonts(_ctx: &egui::Context) {
     // default fonts only
 }
 
-fn setup_custom_theme(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
+fn setup_custom_theme(ctx: &egui::Context, display: &DisplaySettings) {
+    let is_dark = display.theme.dark(ctx);
+    md3::set_dark(is_dark);
+    let mut visuals = if is_dark { egui::Visuals::dark() } else { egui::Visuals::light() };
 
-    visuals.panel_fill = md3::SURFACE;
-    visuals.window_fill = md3::SURFACE;
-    visuals.extreme_bg_color = md3::SURFACE_CONTAINER;
-    visuals.faint_bg_color = md3::SURFACE_CONTAINER;
+    visuals.panel_fill = md3::SURFACE.into();
+    visuals.window_fill = md3::SURFACE.into();
+    visuals.extreme_bg_color = md3::SURFACE_CONTAINER.into();
+    visuals.faint_bg_color = md3::SURFACE_CONTAINER.into();
 
     visuals.window_corner_radius = 16.into();
     visuals.menu_corner_radius = 12.into();
 
     visuals.widgets.noninteractive.corner_radius = 12.into();
-    visuals.widgets.noninteractive.bg_fill = md3::SURFACE_CONTAINER;
+    visuals.widgets.noninteractive.bg_fill = md3::SURFACE_CONTAINER.into();
     visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
     visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, md3::ON_SURFACE);
 
-    visuals.widgets.inactive.bg_fill = md3::SURFACE_CONTAINER_HIGH;
+    visuals.widgets.inactive.bg_fill = md3::SURFACE_CONTAINER_HIGH.into();
     visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
     visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, md3::ON_SURFACE_VARIANT);
     visuals.widgets.inactive.corner_radius = 12.into();
 
-    visuals.widgets.hovered.bg_fill = md3::SURFACE_CONTAINER_HIGHEST;
+    visuals.widgets.hovered.bg_fill = md3::SURFACE_CONTAINER_HIGHEST.into();
     visuals.widgets.hovered.bg_stroke = egui::Stroke::NONE;
     visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, md3::ON_SURFACE);
     visuals.widgets.hovered.corner_radius = 12.into();
 
-    visuals.widgets.active.bg_fill = md3::PRIMARY_CONTAINER;
+    visuals.widgets.active.bg_fill = md3::PRIMARY_CONTAINER.into();
     visuals.widgets.active.bg_stroke = egui::Stroke::NONE;
     visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, md3::ON_PRIMARY_CONTAINER);
     visuals.widgets.active.corner_radius = 12.into();
 
-    visuals.widgets.open.bg_fill = md3::SURFACE_CONTAINER_HIGHEST;
+    visuals.widgets.open.bg_fill = md3::SURFACE_CONTAINER_HIGHEST.into();
     visuals.widgets.open.corner_radius = 12.into();
     visuals.widgets.open.bg_stroke = egui::Stroke::NONE;
 
-    visuals.selection.bg_fill = md3::PRIMARY_CONTAINER;
+    visuals.selection.bg_fill = md3::PRIMARY_CONTAINER.into();
     visuals.selection.stroke = egui::Stroke::new(1.0_f32, md3::PRIMARY);
 
     ctx.set_visuals(visuals);
@@ -703,6 +778,7 @@ fn setup_custom_theme(ctx: &egui::Context) {
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         style.spacing.button_padding = egui::vec2(16.0, 8.0);
     });
+    ctx.set_zoom_factor(display.text_scale);
 }
 
 fn m3_card<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -714,7 +790,7 @@ fn m3_card<R>(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) 
         .inner
 }
 
-fn m3_button_filled(ui: &mut egui::Ui, label: &str) -> bool {
+fn m3_button_filled(ui: &mut egui::Ui, label: impl Into<String>) -> bool {
     let btn = egui::Button::new(
         egui::RichText::new(label).size(13.0).color(md3::ON_PRIMARY),
     )
@@ -724,7 +800,7 @@ fn m3_button_filled(ui: &mut egui::Ui, label: &str) -> bool {
     ui.add(btn).clicked()
 }
 
-fn m3_button_tonal(ui: &mut egui::Ui, label: &str) -> bool {
+fn m3_button_tonal(ui: &mut egui::Ui, label: impl Into<String>) -> bool {
     let btn = egui::Button::new(
         egui::RichText::new(label).size(13.0).color(md3::ON_SECONDARY_CONTAINER),
     )
@@ -734,7 +810,7 @@ fn m3_button_tonal(ui: &mut egui::Ui, label: &str) -> bool {
     ui.add(btn).clicked()
 }
 
-fn m3_button_outlined(ui: &mut egui::Ui, label: &str) -> bool {
+fn m3_button_outlined(ui: &mut egui::Ui, label: impl Into<String>) -> bool {
     let btn = egui::Button::new(
         egui::RichText::new(label).size(13.0).color(md3::PRIMARY),
     )
@@ -744,12 +820,12 @@ fn m3_button_outlined(ui: &mut egui::Ui, label: &str) -> bool {
     ui.add(btn).clicked()
 }
 
-fn m3_tab(ui: &mut egui::Ui, current: &mut AppTab, target: AppTab, label: &str) {
+fn m3_tab(ui: &mut egui::Ui, current: &mut AppTab, target: AppTab, label: impl Into<String>) {
     let selected = *current == target;
-    let (bg, fg) = if selected {
-        (md3::SECONDARY_CONTAINER, md3::ON_SECONDARY_CONTAINER)
+    let (bg, fg): (egui::Color32, egui::Color32) = if selected {
+        (md3::SECONDARY_CONTAINER.into(), md3::ON_SECONDARY_CONTAINER.into())
     } else {
-        (egui::Color32::TRANSPARENT, md3::ON_SURFACE_VARIANT)
+        (egui::Color32::TRANSPARENT, md3::ON_SURFACE_VARIANT.into())
     };
     let btn = egui::Button::new(
         egui::RichText::new(label).size(12.5).color(fg),
@@ -792,12 +868,17 @@ impl eframe::App for AirCardApp {
                     );
 
                     ui.add_space(20.0);
-                    m3_tab(ui, &mut self.current_tab, AppTab::Wallet, "Wallet");
-                    m3_tab(ui, &mut self.current_tab, AppTab::Passcode, "Passcode");
-                    m3_tab(ui, &mut self.current_tab, AppTab::Help, "Help");
+                    let wallet_tab = self.t("tab-wallet");
+                    let passcode_tab = self.t("tab-passcode");
+                    let help_tab = self.t("tab-help");
+                    let settings_tab = self.t("tab-settings");
+                    m3_tab(ui, &mut self.current_tab, AppTab::Wallet, wallet_tab);
+                    m3_tab(ui, &mut self.current_tab, AppTab::Passcode, passcode_tab);
+                    m3_tab(ui, &mut self.current_tab, AppTab::Help, help_tab);
+                    m3_tab(ui, &mut self.current_tab, AppTab::Settings, settings_tab);
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if m3_button_outlined(ui, "Refresh") {
+                        if m3_button_outlined(ui, self.t("action-refresh")) {
                             self.refresh_devices();
                         }
                         ui.add_space(4.0);
@@ -861,7 +942,7 @@ impl eframe::App for AirCardApp {
                             if connection_ready { md3::SUCCESS } else { md3::ERROR },
                         );
                         ui.label(
-                            egui::RichText::new(if connection_ready { "Ready" } else { "Unavailable" })
+                            egui::RichText::new(if connection_ready { self.t("status-ready") } else { self.t("status-unavailable") })
                                 .size(12.0)
                                 .color(if connection_ready {
                                     md3::ON_SURFACE
@@ -919,11 +1000,12 @@ impl eframe::App for AirCardApp {
                     .inner_margin(egui::Margin::same(16)),
             )
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::ScrollArea::both().auto_shrink([false, true]).show(ui, |ui| {
                     match self.current_tab {
                         AppTab::Wallet => self.show_wallet_tab(ctx, ui),
                         AppTab::Passcode => self.show_passcode_tab(ctx, ui),
                         AppTab::Help => self.show_help_tab(ui),
+                        AppTab::Settings => self.show_settings_tab(ctx, ui),
                     }
                 });
             });
@@ -991,6 +1073,10 @@ impl eframe::App for AirCardApp {
             }
         }
     }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, "aircard_display_settings", &self.display);
+    }
 }
 
 impl AirCardApp {
@@ -1020,20 +1106,20 @@ impl AirCardApp {
         ui.columns(2, |cols| {
             let left = &mut cols[0];
             m3_card(left, |ui| {
-                ui.label(egui::RichText::new("Card Configuration").strong().size(16.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(self.t("wallet-configuration")).strong().size(16.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("Target your card and choose replacement artwork").size(12.0).color(md3::ON_SURFACE_VARIANT));
+                ui.label(egui::RichText::new(self.t("wallet-description")).size(12.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(16.0);
 
                 // Target Card Hash
-                ui.label(egui::RichText::new("Target Card Hash").strong().size(12.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(self.t("wallet-hash")).strong().size(12.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     let btn_w = 90.0;
                     let text_w = (ui.available_width() - btn_w - 12.0).max(150.0);
                     ui.add(egui::TextEdit::singleline(&mut self.card_hash).hint_text("Base64 pass hash...").desired_width(text_w));
 
-                    let scan_label = if self.scanning_syslog { "Stop" } else { "Scan" };
+                    let scan_label = if self.scanning_syslog { self.t("action-stop") } else { self.t("action-scan") };
                     let scan_bg = if self.scanning_syslog { md3::ERROR_CONTAINER } else { md3::PRIMARY_CONTAINER };
                     let scan_fg = if self.scanning_syslog { md3::ERROR } else { md3::ON_PRIMARY_CONTAINER };
                     let scan_btn = egui::Button::new(egui::RichText::new(scan_label).size(12.0).color(scan_fg))
@@ -1071,13 +1157,13 @@ impl AirCardApp {
                 ui.add_space(16.0);
 
                 // Card Skin
-                ui.label(egui::RichText::new("Card Skin Artwork").strong().size(12.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(self.t("wallet-artwork")).strong().size(12.0).color(md3::ON_SURFACE));
                 ui.label(egui::RichText::new("PNG, JPG, WebP - auto-scaled to 1536x969").size(11.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    if m3_button_filled(ui, "Choose Image...") { self.select_skin(ctx); }
+                    if m3_button_filled(ui, self.t("action-choose-image")) { self.select_skin(ctx); }
                     if self.skin.is_some() {
-                        if m3_button_tonal(ui, "Export PNG") { self.save_prepared_png(); }
+                        if m3_button_tonal(ui, self.t("action-export-png")) { self.save_prepared_png(); }
                     }
                 });
 
@@ -1091,7 +1177,7 @@ impl AirCardApp {
                 ui.add_space(16.0);
 
                 // Apply
-                ui.label(egui::RichText::new("Write to iPhone").strong().size(12.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(self.t("wallet-write")).strong().size(12.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
 
                 let can_flash = !self.is_busy
@@ -1099,7 +1185,7 @@ impl AirCardApp {
                     && !self.card_hash.trim().is_empty()
                     && self.skin.is_some();
                 let flash_btn = egui::Button::new(
-                    egui::RichText::new("Apply Card Skin").strong().size(14.0)
+                    egui::RichText::new(self.t("action-apply-card")).strong().size(14.0)
                         .color(if can_flash { md3::ON_PRIMARY } else { md3::ON_SURFACE_VARIANT }),
                 )
                 .fill(if can_flash { md3::PRIMARY } else { md3::SURFACE_CONTAINER_HIGH })
@@ -1129,7 +1215,7 @@ impl AirCardApp {
             // Right: preview
             let right = &mut cols[1];
             m3_card(right, |ui| {
-                ui.label(egui::RichText::new("Wallet Preview").strong().size(16.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(self.t("wallet-preview")).strong().size(16.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new("1536 x 969 px pass canvas").size(12.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(12.0);
@@ -1149,7 +1235,7 @@ impl AirCardApp {
                     } else {
                         painter.rect_filled(rect, 16.0, md3::SURFACE_CONTAINER_HIGH);
                         painter.text(rect.center(), egui::Align2::CENTER_CENTER,
-                            "No artwork loaded", egui::FontId::proportional(14.0), md3::ON_SURFACE_VARIANT);
+                            self.t("wallet-no-artwork"), egui::FontId::proportional(14.0), md3::ON_SURFACE_VARIANT);
                     }
                 });
 
@@ -1176,16 +1262,16 @@ impl AirCardApp {
             // Left: config
             let left = &mut cols[0];
             m3_card(left, |ui| {
-                ui.label(egui::RichText::new("Passcode Theme").strong().size(16.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(self.t("passcode-title")).strong().size(16.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
-                ui.label(egui::RichText::new("Custom lockscreen keypad from Cowabunga or Nugget").size(12.0).color(md3::ON_SURFACE_VARIANT));
+                ui.label(egui::RichText::new(self.t("passcode-description")).size(12.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(16.0);
 
                 // Theme file
-                ui.label(egui::RichText::new("Theme Package").strong().size(12.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(self.t("passcode-package")).strong().size(12.0).color(md3::ON_SURFACE));
                 ui.label(egui::RichText::new("Choose a .passthm archive containing dialer artwork").size(11.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(4.0);
-                if m3_button_filled(ui, "Choose .passthm...") { self.select_theme_file(ctx); }
+                if m3_button_filled(ui, self.t("action-choose-theme")) { self.select_theme_file(ctx); }
 
                 if let Some(theme) = &self.loaded_theme {
                     let fname = self.theme_path.as_ref()
@@ -1197,7 +1283,7 @@ impl AirCardApp {
                 ui.add_space(16.0);
 
                 // iOS version
-                ui.label(egui::RichText::new("Target iOS Cache").strong().size(12.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(self.t("passcode-cache")).strong().size(12.0).color(md3::ON_SURFACE));
                 ui.label(egui::RichText::new("Select cache format based on connected iOS version").size(11.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(4.0);
                 let combo_w = (ui.available_width() - 4.0).max(150.0);
@@ -1221,7 +1307,7 @@ impl AirCardApp {
                 ui.add_space(16.0);
 
                 // Keypad Language
-                ui.label(egui::RichText::new("Keypad Language").strong().size(12.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(self.t("passcode-keypad-language")).strong().size(12.0).color(md3::ON_SURFACE));
                 ui.label(egui::RichText::new("Subtext alphabet layout (English, Russian, Ukrainian, Japanese, or Universal)").size(11.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(4.0);
                 let mut lang_changed = false;
@@ -1246,8 +1332,9 @@ impl AirCardApp {
 
                 // Bold Font Toggle
                 let mut bold_changed = false;
+                let bold_label = self.t("passcode-bold");
                 ui.horizontal(|ui| {
-                    if ui.checkbox(&mut self.passcode_bold, egui::RichText::new("Bold Text (iOS Accessibility)").strong().size(12.0).color(md3::ON_SURFACE)).changed() {
+                    if ui.checkbox(&mut self.passcode_bold, egui::RichText::new(bold_label).strong().size(12.0).color(md3::ON_SURFACE)).changed() {
                         bold_changed = true;
                     }
                 });
@@ -1266,14 +1353,14 @@ impl AirCardApp {
                 ui.add_space(16.0);
 
                 // Apply
-                ui.label(egui::RichText::new("Write to iPhone").strong().size(12.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(self.t("wallet-write")).strong().size(12.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
 
                 let can_flash = !self.is_busy
                     && self.selected_transport_available()
                     && self.loaded_theme.is_some();
                 let flash_btn = egui::Button::new(
-                    egui::RichText::new("Apply Passcode Theme").strong().size(14.0)
+                    egui::RichText::new(self.t("action-apply-theme")).strong().size(14.0)
                         .color(if can_flash { md3::ON_PRIMARY } else { md3::ON_SURFACE_VARIANT }),
                 )
                 .fill(if can_flash { md3::PRIMARY } else { md3::SURFACE_CONTAINER_HIGH })
@@ -1302,7 +1389,7 @@ impl AirCardApp {
             // Right: preview
             let right = &mut cols[1];
             m3_card(right, |ui| {
-                ui.label(egui::RichText::new("Keypad Preview").strong().size(16.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(self.t("passcode-preview")).strong().size(16.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new("Dialer button artwork").size(12.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(12.0);
@@ -1316,7 +1403,7 @@ impl AirCardApp {
                         let painter = ui.painter();
                         painter.rect_filled(rect, 16.0, md3::SURFACE_CONTAINER_HIGH);
                         painter.text(rect.center(), egui::Align2::CENTER_CENTER,
-                            "No theme loaded", egui::FontId::proportional(14.0), md3::ON_SURFACE_VARIANT);
+                            self.t("passcode-no-theme"), egui::FontId::proportional(14.0), md3::ON_SURFACE_VARIANT);
                     } else {
                         let (rect, _) = ui.allocate_exact_size(egui::vec2(pass_w, pass_h), egui::Sense::hover());
                         let painter = ui.painter();
@@ -1391,7 +1478,7 @@ impl AirCardApp {
         ui.columns(2, |cols| {
             let left = &mut cols[0];
             m3_card(left, |ui| {
-                ui.label(egui::RichText::new("Setup & Card Hash Guide").strong().size(16.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(self.t("help-setup")).strong().size(16.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new("Everything you need to connect and capture your card").size(12.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(16.0);
@@ -1416,7 +1503,7 @@ impl AirCardApp {
 
             let right = &mut cols[1];
             m3_card(right, |ui| {
-                ui.label(egui::RichText::new("Activation & Theme Guide").strong().size(16.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(self.t("help-activation")).strong().size(16.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
                 ui.label(egui::RichText::new("Applying skins and dialer keypad packages").size(12.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(16.0);
@@ -1438,5 +1525,61 @@ impl AirCardApp {
                 ui.label(egui::RichText::new("- Lock screen to verify your updated keypad artwork").size(11.5).color(md3::ON_SURFACE_VARIANT));
             });
         });
+    }
+
+    fn show_settings_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let mut changed = false;
+        let title = self.t("settings-title");
+        let description = self.t("settings-description");
+        let language_label = self.t("settings-language");
+        let theme_label = self.t("settings-theme");
+        let text_size_label = self.t("settings-text-size");
+        let text_hint = self.t("settings-text-hint");
+        let theme_system = self.t("theme-system");
+        let theme_light = self.t("theme-light");
+        let theme_dark = self.t("theme-dark");
+        m3_card(ui, |ui| {
+            ui.set_max_width(580.0);
+            ui.label(egui::RichText::new(title).strong().size(18.0).color(md3::ON_SURFACE));
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(description).size(12.0).color(md3::ON_SURFACE_VARIANT));
+            ui.add_space(20.0);
+
+            ui.label(egui::RichText::new(language_label).strong().size(13.0).color(md3::ON_SURFACE));
+            egui::ComboBox::from_id_salt("application_language")
+                .width(ui.available_width().min(360.0))
+                .selected_text(self.display.language.label())
+                .show_ui(ui, |ui| {
+                    for language in AppLanguage::ALL {
+                        changed |= ui.selectable_value(&mut self.display.language, language, language.label()).changed();
+                    }
+                });
+
+            ui.add_space(16.0);
+            ui.label(egui::RichText::new(theme_label).strong().size(13.0).color(md3::ON_SURFACE));
+            ui.horizontal_wrapped(|ui| {
+                for theme in ThemeMode::ALL {
+                    let label = match theme {
+                        ThemeMode::System => &theme_system,
+                        ThemeMode::Light => &theme_light,
+                        ThemeMode::Dark => &theme_dark,
+                    };
+                    changed |= ui.radio_value(&mut self.display.theme, theme, label.as_str()).changed();
+                }
+            });
+
+            ui.add_space(16.0);
+            ui.label(egui::RichText::new(text_size_label).strong().size(13.0).color(md3::ON_SURFACE));
+            changed |= ui.add(
+                egui::Slider::new(&mut self.display.text_scale, 0.85..=1.35)
+                    .step_by(0.05)
+                    .suffix("×"),
+            ).changed();
+            ui.label(egui::RichText::new(text_hint).size(11.5).color(md3::ON_SURFACE_VARIANT).weak());
+        });
+
+        if changed {
+            self.apply_display_settings(ctx);
+        }
     }
 }
