@@ -313,12 +313,13 @@ impl AirCardApp {
             if let Some(flag) = self.scan_stop_flag.take() {
                 flag.store(true, Ordering::Relaxed);
             }
-            self.scanning_syslog = false;
-            self.add_log("Syslog scanning stopped by user.");
-            self.status_msg = "Syslog scanning stopped.".to_string();
+            // Keep the receiver until the worker acknowledges cancellation.
+            self.add_log("Stopping wallet scan...");
+            self.status_msg = "Stopping wallet scan...".to_string();
             return;
         }
 
+        if self.is_busy || self.task_rx.is_some() { return; }
         if !self.validate_selected_transport("Syslog scan") {
             return;
         }
@@ -353,13 +354,14 @@ impl AirCardApp {
                     let _ = tx.send(BackgroundTaskMessage::Done(Ok("Syslog scan finished".into())));
                 }
                 Err(e) => {
-                    let _ = tx.send(BackgroundTaskMessage::Done(Err(e.to_string())));
+                    let _ = tx.send(BackgroundTaskMessage::Done(Err(format!("{e:#}"))));
                 }
             }
         });
     }
 
     fn flash_card(&mut self) {
+        if self.is_busy || self.scanning_syslog || self.task_rx.is_some() { return; }
         if !self.validate_selected_transport("Card flash") {
             return;
         }
@@ -424,7 +426,7 @@ impl AirCardApp {
             match res {
                 Ok(()) => {
                     let _ = tx.send(BackgroundTaskMessage::Done(Ok(
-                        "Card skin successfully flashed! Force quit Wallet on iPhone and reopen it.".into(),
+                        "Artwork submitted. Force quit Wallet and reopen it to verify the appearance.".into(),
                     )));
                 }
                 Err(e) => {
@@ -501,6 +503,7 @@ impl AirCardApp {
     }
 
     fn flash_theme(&mut self) {
+        if self.is_busy || self.scanning_syslog || self.task_rx.is_some() { return; }
         if !self.validate_selected_transport("Theme flash") {
             return;
         }
@@ -1005,7 +1008,7 @@ impl AirCardApp {
                         ui.spinner();
                         ui.vertical(|ui| {
                             ui.label(egui::RichText::new("Scanning syslog...").strong().size(13.0).color(md3::ON_TERTIARY_CONTAINER));
-                            ui.label(egui::RichText::new("Open Wallet on iPhone and tap your card").size(11.5).color(md3::ON_TERTIARY_CONTAINER));
+                            ui.label(egui::RichText::new("Open Wallet and open the card details. For supported transit cards, turn on Service Mode while scanning.").size(11.5).color(md3::ON_TERTIARY_CONTAINER));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let btn = egui::Button::new(egui::RichText::new("Stop").size(12.0).color(md3::ON_SURFACE))

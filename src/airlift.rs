@@ -1,11 +1,12 @@
 use std::collections::HashMap;
-use std::ptr;
+use std::io::Write;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
 use crate::afc::AfcClient;
-use crate::apple::{CFTypeRef, get_apple_libraries};
-use crate::device::ActiveDeviceSession;
+use crate::service_protocol::{receive_plist, send_plist};
+use crate::wallet_connection::DeviceSession;
 
 pub const SOURCE_PREFIX: &str = "airlift-src-";
 pub const LINK_PREFIX: &str = "airlift-link-";
@@ -59,8 +60,11 @@ pub fn build_streaming_zip_archive_multi(target: &str, items: &[(&str, &[u8])]) 
     let mut metadata_plist = Vec::new();
     let mut meta_dict = HashMap::new();
     meta_dict.insert("Version".to_string(), plist::Value::Integer(2.into()));
-    plist::to_writer_binary(&mut metadata_plist, &plist::Value::Dictionary(meta_dict.into_iter().collect()))
-        .context("Failed to encode ZipMetadata.plist")?;
+    plist::to_writer_binary(
+        &mut metadata_plist,
+        &plist::Value::Dictionary(meta_dict.into_iter().collect()),
+    )
+    .context("Failed to encode ZipMetadata.plist")?;
 
     let mut entries = Vec::new();
 
@@ -154,8 +158,8 @@ pub fn build_streaming_zip_archive_multi(target: &str, items: &[(&str, &[u8])]) 
         // Local header (0x04034b50)
         output.extend_from_slice(&0x04034b50u32.to_le_bytes());
         output.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        output.extend_from_slice(&0u16.to_le_bytes());  // flags
-        output.extend_from_slice(&0u16.to_le_bytes());  // compression = stored (0)
+        output.extend_from_slice(&0u16.to_le_bytes()); // flags
+        output.extend_from_slice(&0u16.to_le_bytes()); // compression = stored (0)
         output.extend_from_slice(&0x2800u16.to_le_bytes()); // mod time
         output.extend_from_slice(&0x5D30u16.to_le_bytes()); // mod date
         output.extend_from_slice(&crc.to_le_bytes());
@@ -167,7 +171,14 @@ pub fn build_streaming_zip_archive_multi(target: &str, items: &[(&str, &[u8])]) 
         output.extend_from_slice(&extra);
         output.extend_from_slice(&entry.data);
 
-        cd_entries.push((entry.name, entry.mode, crc, entry.data.len() as u32, offset, extra));
+        cd_entries.push((
+            entry.name,
+            entry.mode,
+            crc,
+            entry.data.len() as u32,
+            offset,
+            extra,
+        ));
     }
 
     let cd_start = output.len() as u32;
@@ -181,18 +192,18 @@ pub fn build_streaming_zip_archive_multi(target: &str, items: &[(&str, &[u8])]) 
         output.extend_from_slice(&0x02014b50u32.to_le_bytes());
         output.extend_from_slice(&((3u16 << 8) | 20u16).to_le_bytes()); // version made by = Unix (3), 2.0
         output.extend_from_slice(&20u16.to_le_bytes()); // version needed
-        output.extend_from_slice(&0u16.to_le_bytes());  // flags
-        output.extend_from_slice(&0u16.to_le_bytes());  // compression = 0
+        output.extend_from_slice(&0u16.to_le_bytes()); // flags
+        output.extend_from_slice(&0u16.to_le_bytes()); // compression = 0
         output.extend_from_slice(&0x2800u16.to_le_bytes()); // time
         output.extend_from_slice(&0x5D30u16.to_le_bytes()); // date
         output.extend_from_slice(&crc.to_le_bytes());
-        output.extend_from_slice(&len.to_le_bytes());   // compressed
-        output.extend_from_slice(&len.to_le_bytes());   // uncompressed
+        output.extend_from_slice(&len.to_le_bytes()); // compressed
+        output.extend_from_slice(&len.to_le_bytes()); // uncompressed
         output.extend_from_slice(&name_len.to_le_bytes());
         output.extend_from_slice(&extra_len.to_le_bytes());
-        output.extend_from_slice(&0u16.to_le_bytes());  // comment len
-        output.extend_from_slice(&0u16.to_le_bytes());  // disk start
-        output.extend_from_slice(&0u16.to_le_bytes());  // internal attr
+        output.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        output.extend_from_slice(&0u16.to_le_bytes()); // disk start
+        output.extend_from_slice(&0u16.to_le_bytes()); // internal attr
         output.extend_from_slice(&ext_attr.to_le_bytes()); // external attr
         output.extend_from_slice(&offset.to_le_bytes());
         output.extend_from_slice(name_bytes);
@@ -219,8 +230,14 @@ pub fn build_books_plist(identifiers: &[String]) -> Result<Vec<u8>> {
     let mut rows = Vec::new();
     for (idx, ident) in identifiers.iter().enumerate() {
         let mut row = HashMap::new();
-        row.insert("Persistent ID".to_string(), plist::Value::String(ident.clone()));
-        row.insert("Item ID".to_string(), plist::Value::String((idx + 1).to_string()));
+        row.insert(
+            "Persistent ID".to_string(),
+            plist::Value::String(ident.clone()),
+        );
+        row.insert(
+            "Item ID".to_string(),
+            plist::Value::String((idx + 1).to_string()),
+        );
         row.insert("DSID".to_string(), plist::Value::String("1".to_string()));
         rows.push(plist::Value::Dictionary(row.into_iter().collect()));
     }
@@ -229,8 +246,11 @@ pub fn build_books_plist(identifiers: &[String]) -> Result<Vec<u8>> {
     root.insert("Books".to_string(), plist::Value::Array(rows));
 
     let mut buffer = Vec::new();
-    plist::to_writer_binary(&mut buffer, &plist::Value::Dictionary(root.into_iter().collect()))
-        .context("Failed to serialize Books.plist")?;
+    plist::to_writer_binary(
+        &mut buffer,
+        &plist::Value::Dictionary(root.into_iter().collect()),
+    )
+    .context("Failed to serialize Books.plist")?;
     Ok(buffer)
 }
 
@@ -241,14 +261,40 @@ pub struct BooksSnapshot {
 pub fn snapshot_books(afc: &AfcClient) -> Result<BooksSnapshot> {
     let mut files = HashMap::new();
     for &path in TRACKED_BOOKS_FILES {
-        if afc.exists(path) {
-            let data = afc.read_file(path).context(format!("Failed to read Books file: {}", path))?;
+        if afc.try_exists(path)? {
+            let data = afc
+                .read_file(path)
+                .context(format!("Failed to read Books file: {}", path))?;
             files.insert(path.to_string(), Some(data));
         } else {
             files.insert(path.to_string(), None);
         }
     }
     Ok(BooksSnapshot { files })
+}
+
+pub fn save_recovery(snapshot: &BooksSnapshot, udid: &str) -> Result<std::path::PathBuf> {
+    let root = std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA missing")?;
+    let dir = std::path::PathBuf::from(root)
+        .join("AirCard")
+        .join("recovery")
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&dir)?;
+    let mut values = plist::Dictionary::new();
+    for (name, data) in &snapshot.files {
+        values.insert(
+            name.clone(),
+            data.as_ref()
+                .map(|d| plist::Value::Data(d.clone()))
+                .unwrap_or(plist::Value::Boolean(false)),
+        );
+    }
+    values.insert("DeviceUDID".into(), plist::Value::String(udid.into()));
+    let path = dir.join("Books-before-write.plist");
+    let mut file = std::fs::File::create(&path)?;
+    plist::Value::Dictionary(values).to_writer_binary(&mut file)?;
+    file.sync_all()?;
+    Ok(path)
 }
 
 pub fn restore_books(afc: &AfcClient, snapshot: &BooksSnapshot) -> Result<()> {
@@ -264,7 +310,7 @@ pub fn restore_books(afc: &AfcClient, snapshot: &BooksSnapshot) -> Result<()> {
                 }
             }
             None => {
-                if afc.exists(path) {
+                if afc.try_exists(path)? {
                     if let Err(e) = afc.remove_path(path) {
                         errors.push(format!("Restore removal failed for {}: {}", path, e));
                     }
@@ -280,91 +326,23 @@ pub fn restore_books(afc: &AfcClient, snapshot: &BooksSnapshot) -> Result<()> {
 }
 
 pub fn stage_streaming_zip(
-    session: &ActiveDeviceSession,
+    session: &mut DeviceSession,
     source_subdir: &str,
     archive: &[u8],
 ) -> Result<()> {
-    let libs = get_apple_libraries()?;
-    let zip_service = session.start_service("com.apple.streaming_zip_conduit")?;
-
-    let send_res = (|| -> Result<()> {
-        let mut msg_dict = HashMap::new();
-        msg_dict.insert("MediaSubdir".to_string(), plist::Value::String(source_subdir.to_string()));
-        let mut msg_plist = Vec::new();
-        plist::to_writer_binary(&mut msg_plist, &plist::Value::Dictionary(msg_dict.into_iter().collect()))?;
-
-        let cf_msg = libs.create_cf_plist_from_bytes(&msg_plist)?;
-        let status = unsafe {
-            (libs.amd_service_connection_send_message)(
-                zip_service,
-                cf_msg.raw,
-                crate::apple::K_CFPROPERTY_LIST_BINARY_FORMAT_V1_0,
-            )
-        };
-        if status != 0 {
-            bail!("AMDServiceConnectionSendMessage failed with code {}", status);
-        }
-
-        // Send streaming zip payload
-        let mut sent = 0;
-        while sent < archive.len() {
-            let chunk_size = std::cmp::min(65536, archive.len() - sent);
-            let s = unsafe {
-                (libs.amd_service_connection_send)(
-                    zip_service,
-                    archive.as_ptr().add(sent),
-                    chunk_size,
-                )
-            };
-            if s <= 0 {
-                bail!("AMDServiceConnectionSend failed during archive transmission");
-            }
-            sent += s as usize;
-        }
-
-        // Set receive timeout so socket cannot block indefinitely
-        let raw_socket = unsafe { (libs.amd_service_connection_get_socket)(zip_service) };
-        if raw_socket > 0 {
-            #[cfg(windows)]
-            unsafe {
-                unsafe extern "system" {
-                    fn setsockopt(s: usize, level: i32, optname: i32, optval: *const i8, optlen: i32) -> i32;
-                }
-                const SOL_SOCKET: i32 = 0xffff;
-                const SO_RCVTIMEO: i32 = 0x1006;
-                let timeout_ms: u32 = 25000;
-                let _ = setsockopt(
-                    raw_socket as usize,
-                    SOL_SOCKET,
-                    SO_RCVTIMEO,
-                    &timeout_ms as *const u32 as *const i8,
-                    std::mem::size_of::<u32>() as i32,
-                );
-            }
-        }
-
-        // Receive response
-        let mut response: CFTypeRef = ptr::null();
-        let mut format: isize = 0;
-        let recv_status = unsafe {
-            (libs.amd_service_connection_receive_message)(zip_service, &mut response, &mut format)
-        };
-        if !response.is_null() {
-            unsafe { (libs.cf_release)(response) };
-        }
-
-        if recv_status != 0 {
-            bail!("StreamingZip conduit returned error code {}", recv_status);
-        }
-
-        Ok(())
-    })();
-
-    unsafe {
-        (libs.amd_service_connection_invalidate)(zip_service);
+    let mut stream = session.start_service("com.apple.streaming_zip_conduit")?;
+    stream.set_timeout(Duration::from_secs(25))?;
+    let request = crate::usbmux::dict([("MediaSubdir", crate::usbmux::string(source_subdir))]);
+    send_plist(&mut stream, &request, false)?;
+    for chunk in archive.chunks(65536) {
+        stream.write_all(chunk)?;
     }
-
-    send_res
+    stream.flush()?;
+    let response = receive_plist(&mut stream, false)?;
+    if let Some(error) = response.as_dictionary().and_then(|d| d.get("Error")) {
+        bail!("StreamingZip rejected archive: {error:?}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -377,7 +355,8 @@ mod tests {
         let archive = build_streaming_zip_archive(
             "/var/mobile/Library/Passes/Cards/abc.pkpass/cardBackgroundCombined@2x.png",
             payload,
-        ).expect("build streaming zip should succeed");
+        )
+        .expect("build streaming zip should succeed");
 
         assert!(!archive.is_empty());
         // Verify local file header signature 0x04034b50
@@ -385,7 +364,10 @@ mod tests {
 
         // Verify that SZ_EXTRA_ID 0x5A53 is in the archive
         let has_extra = archive.windows(2).any(|w| w == &[0x53, 0x5a]);
-        assert!(has_extra, "Must contain Apple StreamingZip extra field 0x5A53");
+        assert!(
+            has_extra,
+            "Must contain Apple StreamingZip extra field 0x5A53"
+        );
     }
 
     #[test]
@@ -400,7 +382,10 @@ mod tests {
         let value = plist::Value::from_reader(std::io::Cursor::new(plist_bytes))
             .expect("should deserialize binary plist");
         let dict = value.as_dictionary().expect("root must be dictionary");
-        let books = dict.get("Books").and_then(|v| v.as_array()).expect("Books must be array");
+        let books = dict
+            .get("Books")
+            .and_then(|v| v.as_array())
+            .expect("Books must be array");
         assert_eq!(books.len(), 2);
     }
 }
