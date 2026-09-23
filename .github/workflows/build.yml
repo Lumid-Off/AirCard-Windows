@@ -22,15 +22,12 @@ jobs:
           - name: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary: aircard.exe
           - name: macos-x64
             os: macos-15-intel
             target: x86_64-apple-darwin
-            binary: aircard
           - name: macos-arm64
             os: macos-15
             target: aarch64-apple-darwin
-            binary: aircard
 
     steps:
       - name: Checkout repository
@@ -56,9 +53,44 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist
+          Copy-Item target/${{ matrix.target }}/release/aircard.exe dist/aircard.exe
+
+      - name: Package macOS disk image
+        if: runner.os == 'macOS'
+        run: python3 scripts/package-macos.py --binary target/${{ matrix.target }}/release/aircard
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
           name: aircard-${{ matrix.name }}
-          path: target/${{ matrix.target }}/release/${{ matrix.binary }}
+          path: dist/*
           if-no-files-found: error
+
+  release:
+    name: Publish release assets
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: aircard-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          draft: false
+          prerelease: false
