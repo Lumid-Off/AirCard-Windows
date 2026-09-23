@@ -26,28 +26,7 @@ pub const CACHE_FILES: &[&str] = &[
     "Preview",
 ];
 
-#[link(name = "bcrypt")]
-unsafe extern "system" {
-    fn BCryptGenRandom(
-        hAlgorithm: *mut std::ffi::c_void,
-        pbBuffer: *mut u8,
-        cbBuffer: u32,
-        dwFlags: u32,
-    ) -> i32;
-}
-
-pub fn generate_token() -> String {
-    let mut bytes = [0u8; 10];
-    unsafe {
-        let _ = BCryptGenRandom(
-            std::ptr::null_mut(),
-            bytes.as_mut_ptr(),
-            bytes.len() as u32,
-            2, // BCRYPT_USE_SYSTEM_PREFERRED_RNG
-        );
-    }
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
+use crate::platform::generate_token;
 
 pub fn write_system_file<L>(
     udid: &str,
@@ -60,7 +39,7 @@ pub fn write_system_file<L>(
 where
     L: FnMut(&str),
 {
-    let token = generate_token();
+    let token = generate_token()?;
     let source = format!("{}{}", SOURCE_PREFIX, token);
     let link_dest = format!("{}{}", LINK_PREFIX, token);
     let recovered = format!("{}{}", RECOVERED_PREFIX, token);
@@ -153,7 +132,7 @@ where
 
     log(&format!("Packaging atomic batch of {} file(s) for {}...", items.len(), target_dir));
 
-    let token = generate_token();
+    let token = generate_token()?;
     let source = format!("{}{}", SOURCE_PREFIX, token);
     let link_dest = format!("{}{}", LINK_PREFIX, token);
     let recovered = format!("{}{}", RECOVERED_PREFIX, token);

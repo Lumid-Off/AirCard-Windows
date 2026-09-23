@@ -9,15 +9,7 @@ use regex::Regex;
 
 use crate::device::{ActiveDeviceSession, ConnectionMode};
 
-#[cfg(windows)]
-unsafe extern "system" {
-    fn setsockopt(s: usize, level: i32, optname: i32, optval: *const i8, optlen: i32) -> i32;
-}
-
-#[cfg(windows)]
-const SOL_SOCKET: i32 = 0xffff;
-#[cfg(windows)]
-const SO_RCVTIMEO: i32 = 0x1006;
+use crate::platform::set_receive_timeout;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SavedCard {
@@ -26,9 +18,7 @@ pub struct SavedCard {
 }
 
 pub fn get_cards_storage_path() -> PathBuf {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .unwrap_or_else(|_| r"C:\Users\Default\AppData\Local".to_string());
-    let dir = PathBuf::from(local_app_data).join("AirCard");
+    let dir = crate::platform::data_dir();
     let _ = fs::create_dir_all(&dir);
     dir.join("cards.json")
 }
@@ -272,22 +262,14 @@ where
         .context("Failed to start com.apple.syslog_relay service")?;
 
     let raw_socket = unsafe { (libs.amd_service_connection_get_socket)(service_conn) };
-    if raw_socket <= 0 {
+    if raw_socket < 0 {
         unsafe { (libs.amd_service_connection_invalidate)(service_conn) };
         anyhow::bail!("Invalid syslog socket");
     }
 
-    // Set socket receive timeout
-    #[cfg(windows)]
-    unsafe {
-        let timeout_ms: u32 = 500;
-        setsockopt(
-            raw_socket as usize,
-            SOL_SOCKET,
-            SO_RCVTIMEO,
-            &timeout_ms as *const u32 as *const i8,
-            std::mem::size_of::<u32>() as i32,
-        );
+    if let Err(err) = set_receive_timeout(raw_socket, std::time::Duration::from_millis(500)) {
+        unsafe { (libs.amd_service_connection_invalidate)(service_conn) };
+        return Err(err);
     }
 
     log("Syslog relay established. Listening for Wallet & PassKit events...".to_string());
@@ -408,6 +390,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "reads and rewrites the current user's saved card database"]
     fn test_saved_cards_purging() {
         let loaded = load_saved_cards();
         for card in &loaded {
@@ -416,6 +399,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires Apple frameworks and a connected iPhone"]
     fn test_syslog_service_receive() {
         let session = match ActiveDeviceSession::open(None, ConnectionMode::Auto) {
             Ok(s) => s,
@@ -427,16 +411,7 @@ mod tests {
         let libs = &session.libs;
         let conn = session.start_service("com.apple.syslog_relay").expect("start syslog_relay");
         let raw_socket = unsafe { (libs.amd_service_connection_get_socket)(conn) };
-        unsafe {
-            let timeout_ms: u32 = 500;
-            setsockopt(
-                raw_socket as usize,
-                SOL_SOCKET,
-                SO_RCVTIMEO,
-                &timeout_ms as *const u32 as *const i8,
-                std::mem::size_of::<u32>() as i32,
-            );
-        }
+        set_receive_timeout(raw_socket, std::time::Duration::from_millis(500)).unwrap();
         let mut buf = [0u8; 4096];
         let start = std::time::Instant::now();
         let n = unsafe { (libs.amd_service_connection_receive)(conn, buf.as_mut_ptr(), buf.len()) };

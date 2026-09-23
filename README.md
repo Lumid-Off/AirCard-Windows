@@ -1,14 +1,14 @@
-# AirCard (Windows) 🎴
+# AirCard 🎴
 
 > **Apple Wallet Card Skinner & Lockscreen Passcode Themer for iOS 18+ (No Jailbreak Required)**  
-> Native Windows client written in Rust. Powered by the `airlift` AirTraffic sync exploit.
+> Native desktop client for Windows and macOS, written in Rust. Powered by the `airlift` AirTraffic sync exploit.
 
 ---
 
 ## Features
 - 🎨 **Custom Card Skins:** Assign custom artwork, textures, or bank logos to Apple Pay and Apple Cash cards.
 - 🔢 **Lock Screen Passcode Themes (.passthm):** Apply custom keypad button artwork from popular Cowabunga & Nugget `.passthm` themes directly to iOS lockscreen.
-- ⚡ **100% Native & Lightweight:** Single standalone `aircard.exe` (~7.5 MB). No Python, no Flet, no webview, no bloated runtimes.
+- ⚡ **100% Native & Lightweight:** Native `aircard.exe` on Windows and `AirCard.app` on macOS. No Python, no Flet, no webview, no bloated runtimes.
 - 🪟 **Material Design 3 Interface:** Clean, modern dark theme built with `egui` and `eframe`.
 - 📱 **Zero-Hassle Card Detection:** Tap any card in your iPhone's Wallet app while connected to detect its hash in real-time via `syslog_relay`.
 - 📶 **USB & WiFi Transport:** Scan card events and apply Wallet or passcode assets through USB or a paired local WiFi connection.
@@ -17,15 +17,20 @@
 
 ---
 
-## Requirements
-- **Windows 10 / 11 (64-bit)**
-- **Apple Mobile Device Support / 64-bit iTunes** (required for Apple device communication).
-- A Lightning or USB-C cable for the initial trust/pairing setup.
-- For WiFi mode, enable WiFi sync and keep the PC and iPhone on the same local network.
+## Platform support and requirements
+
+| Platform | iPhone scanning and applying changes | Runtime requirement |
+| --- | --- | --- |
+| Windows 10/11 x64 | Native Apple backend over USB or paired WiFi | 64-bit iTunes / Apple Mobile Device Support |
+| macOS Intel / Apple Silicon | Native Apple backend over USB or paired WiFi | Built-in CoreFoundation, MobileDevice, and AirTrafficHost frameworks |
+
+Connect the iPhone by Lightning or USB-C for the initial trust and pairing setup. On macOS,
+also accept the device in Finder; no iTunes installation is required. For WiFi mode, enable
+WiFi sync and keep the computer and iPhone on the same local network.
 
 ---
 
-## ⚠️ Troubleshooting & Driver Repair (If Nothing Works)
+## ⚠️ Windows Troubleshooting & Driver Repair (If Nothing Works)
 
 > [!TIP]
 > **iPhone not detected, AirTraffic sync hangs, or operation fails?**  
@@ -40,17 +45,27 @@
 
 ## Installation
 
-### Pre-built Executable
-1. Download **`aircard.exe`** from [Releases](https://github.com/Lumid-Off/AirCard-Windows/releases).
-2. Connect your iPhone via USB, unlock it, and tap **"Trust this Computer"** if prompted.
-3. Run **`aircard.exe`**. After WiFi sync is enabled, later sessions can work without the cable.
+### Pre-built binaries
+
+Builds published through [Releases](https://github.com/Lumid-Off/AirCard-Windows/releases) use these names:
+
+- Windows x64: `aircard.exe`
+- macOS Intel: `aircard-macos-x64.dmg`
+- macOS Apple Silicon: `aircard-macos-arm64.dmg`
+
+On Windows, run `aircard.exe`. On macOS, open the DMG for your processor, drag
+**AirCard.app** to **Applications**, eject the disk image, and open AirCard from Applications.
+
+The macOS app currently uses an ad-hoc signature. It is **not Developer ID signed or
+notarized by Apple**, so downloaded builds may be blocked by Gatekeeper. Public distribution
+with a verified developer identity requires Developer ID signing and Apple notarization.
 
 ---
 
 ## WiFi Connection Setup
 1. Connect the iPhone by USB for the initial pairing.
-2. In Apple Devices or iTunes, enable **Show this iPhone when on Wi-Fi** / **Sync with this iPhone over Wi-Fi**.
-3. Apply the setting, then keep the iPhone and PC on the same local network.
+2. In Finder on macOS, or Apple Devices/iTunes on Windows, enable **Show this iPhone when on Wi-Fi** / **Sync with this iPhone over Wi-Fi**.
+3. Apply the setting, then keep the iPhone and computer on the same local network.
 4. In AirCard, click **Refresh** and confirm the device shows a **WiFi** transport.
 5. Disconnect the cable, click **Refresh** again, and select **WiFi only**. Use **Auto (USB preferred)** when automatic fallback is desired.
 
@@ -89,21 +104,39 @@ If both transports are available, **Auto** uses USB first and falls back to WiFi
 
 ## Building from Source
 
-Prerequisites: [Rust toolchain](https://rustup.rs/) (`stable-x86_64-pc-windows-msvc`).
+Install the current stable [Rust toolchain](https://rustup.rs/) for your host platform.
+Windows requires the MSVC toolchain and Visual Studio C++ Build Tools. macOS requires
+Xcode Command Line Tools (`xcode-select --install`).
 
-```powershell
-# Clone the repository
+```shell
 git clone https://github.com/Lumid-Off/AirCard-Windows.git
 cd AirCard-Windows
-
-# Run tests
-cargo test
-
-# Build release binary
-cargo build --release
+cargo test --locked
+cargo build --release --locked
 ```
 
-The compiled binary will be in `target\release\aircard.exe`.
+The compiled binary is `target/release/aircard.exe` on Windows and
+`target/release/aircard` on macOS.
+
+### Build a macOS DMG
+
+Run on macOS with Python 3, Rust, and Xcode Command Line Tools installed:
+
+```shell
+# Build for the Mac's native hardware, even when the terminal runs under Rosetta
+python3 scripts/package-macos.py
+
+# Explicitly build an Apple Silicon release and DMG
+rustup target add aarch64-apple-darwin
+python3 scripts/package-macos.py --target aarch64-apple-darwin
+
+# Or package an already-built binary (also used by CI)
+python3 scripts/package-macos.py --binary target/aarch64-apple-darwin/release/aircard
+```
+
+The script verifies the executable architecture, creates an ad-hoc signed `AirCard.app`,
+and writes `dist/aircard-macos-x64.dmg` or `dist/aircard-macos-arm64.dmg`. The disk image
+includes an Applications shortcut and installation instructions.
 
 ---
 
