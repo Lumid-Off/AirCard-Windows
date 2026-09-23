@@ -34,10 +34,6 @@ pub type ATHostConnectionRef = *mut std::ffi::c_void;
 pub type AMDeviceRef = *const std::ffi::c_void;
 pub type AMDeviceNotificationRef = *const std::ffi::c_void;
 pub type AMDServiceConnectionRef = *mut std::ffi::c_void;
-pub type AFCConnectionRef = *mut std::ffi::c_void;
-pub type AFCKeyValueRef = *mut std::ffi::c_void;
-pub type AFCFileRef = u64;
-pub type AFCDirectoryRef = *mut std::ffi::c_void;
 
 #[repr(C)]
 pub struct AMDeviceNotificationCallbackInfo {
@@ -105,27 +101,8 @@ pub struct AppleLibraries {
     pub amd_service_connection_send_message: unsafe extern "C" fn(AMDServiceConnectionRef, CFTypeRef, isize) -> i32,
     pub amd_service_connection_receive_message: unsafe extern "C" fn(AMDServiceConnectionRef, *mut CFTypeRef, *mut isize) -> i32,
 
-    // AFC functions
-    pub afc_connection_open: unsafe extern "C" fn(i32, u32, *mut AFCConnectionRef) -> i32,
-    pub afc_connection_close: unsafe extern "C" fn(AFCConnectionRef) -> i32,
-    pub afc_connection_set_secure_context: unsafe extern "C" fn(AFCConnectionRef, *mut std::ffi::c_void) -> i32,
-    pub afc_connection_set_dispose_secure_context: unsafe extern "C" fn(AFCConnectionRef, i32) -> i32,
-    pub afc_connection_set_io_timeout: unsafe extern "C" fn(AFCConnectionRef, u32) -> i32,
-    pub afc_file_info_open: unsafe extern "C" fn(AFCConnectionRef, *const std::ffi::c_char, *mut AFCKeyValueRef) -> i32,
-    pub afc_key_value_read: unsafe extern "C" fn(AFCKeyValueRef, *mut *const std::ffi::c_char, *mut *const std::ffi::c_char) -> i32,
-    pub afc_key_value_close: unsafe extern "C" fn(AFCKeyValueRef) -> i32,
-    pub afc_file_ref_open: unsafe extern "C" fn(AFCConnectionRef, *const std::ffi::c_char, u64, *mut AFCFileRef) -> i32,
-    pub afc_file_ref_read: unsafe extern "C" fn(AFCConnectionRef, AFCFileRef, *mut u8, *mut isize) -> i32,
-    pub afc_file_ref_write: unsafe extern "C" fn(AFCConnectionRef, AFCFileRef, *const u8, isize) -> i32,
-    pub afc_file_ref_close: unsafe extern "C" fn(AFCConnectionRef, AFCFileRef) -> i32,
-    pub afc_directory_open: unsafe extern "C" fn(AFCConnectionRef, *const std::ffi::c_char, *mut AFCDirectoryRef) -> i32,
-    pub afc_directory_read: unsafe extern "C" fn(AFCConnectionRef, AFCDirectoryRef, *mut *const std::ffi::c_char) -> i32,
-    pub afc_directory_close: unsafe extern "C" fn(AFCConnectionRef, AFCDirectoryRef) -> i32,
-    pub afc_directory_create: unsafe extern "C" fn(AFCConnectionRef, *const std::ffi::c_char) -> i32,
-    pub afc_remove_path: unsafe extern "C" fn(AFCConnectionRef, *const std::ffi::c_char) -> i32,
-
     // AirTrafficHost functions
-    pub at_host_connection_create: unsafe extern "C" fn(CFStringRef) -> ATHostConnectionRef,
+    pub at_host_connection_create: unsafe extern "C" fn(CFStringRef, CFTypeRef) -> ATHostConnectionRef,
     pub at_host_connection_release: unsafe extern "C" fn(ATHostConnectionRef),
     pub at_host_connection_send_host_info: unsafe extern "C" fn(ATHostConnectionRef, CFDictionaryRef),
     pub at_host_connection_send_sync_request: unsafe extern "C" fn(ATHostConnectionRef, CFArrayRef, CFDictionaryRef, CFDictionaryRef),
@@ -219,24 +196,6 @@ pub fn get_apple_libraries() -> Result<Arc<AppleLibraries>> {
         let amd_service_connection_send_message = load_sym!(md_lib, "AMDServiceConnectionSendMessage");
         let amd_service_connection_receive_message = load_sym!(md_lib, "AMDServiceConnectionReceiveMessage");
 
-        let afc_connection_open = load_sym!(md_lib, "AFCConnectionOpen");
-        let afc_connection_close = load_sym!(md_lib, "AFCConnectionClose");
-        let afc_connection_set_secure_context = load_sym!(md_lib, "AFCConnectionSetSecureContext");
-        let afc_connection_set_dispose_secure_context = load_sym!(md_lib, "AFCConnectionSetDisposeSecureContextOnInvalidate");
-        let afc_connection_set_io_timeout = load_sym!(md_lib, "AFCConnectionSetIOTimeout");
-        let afc_file_info_open = load_sym!(md_lib, "AFCFileInfoOpen");
-        let afc_key_value_read = load_sym!(md_lib, "AFCKeyValueRead");
-        let afc_key_value_close = load_sym!(md_lib, "AFCKeyValueClose");
-        let afc_file_ref_open = load_sym!(md_lib, "AFCFileRefOpen");
-        let afc_file_ref_read = load_sym!(md_lib, "AFCFileRefRead");
-        let afc_file_ref_write = load_sym!(md_lib, "AFCFileRefWrite");
-        let afc_file_ref_close = load_sym!(md_lib, "AFCFileRefClose");
-        let afc_directory_open = load_sym!(md_lib, "AFCDirectoryOpen");
-        let afc_directory_read = load_sym!(md_lib, "AFCDirectoryRead");
-        let afc_directory_close = load_sym!(md_lib, "AFCDirectoryClose");
-        let afc_directory_create = load_sym!(md_lib, "AFCDirectoryCreate");
-        let afc_remove_path = load_sym!(md_lib, "AFCRemovePath");
-
         let at_host_connection_create = load_sym!(ath_lib, "ATHostConnectionCreate");
         let at_host_connection_release = load_sym!(ath_lib, "ATHostConnectionRelease");
         let at_host_connection_send_host_info = load_sym!(ath_lib, "ATHostConnectionSendHostInfo");
@@ -288,24 +247,6 @@ pub fn get_apple_libraries() -> Result<Arc<AppleLibraries>> {
             amd_service_connection_receive,
             amd_service_connection_send_message,
             amd_service_connection_receive_message,
-
-            afc_connection_open,
-            afc_connection_close,
-            afc_connection_set_secure_context,
-            afc_connection_set_dispose_secure_context,
-            afc_connection_set_io_timeout,
-            afc_file_info_open,
-            afc_key_value_read,
-            afc_key_value_close,
-            afc_file_ref_open,
-            afc_file_ref_read,
-            afc_file_ref_write,
-            afc_file_ref_close,
-            afc_directory_open,
-            afc_directory_read,
-            afc_directory_close,
-            afc_directory_create,
-            afc_remove_path,
 
             at_host_connection_create,
             at_host_connection_release,

@@ -1,181 +1,77 @@
-use std::collections::HashSet;
-use std::fs;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
+use crate::wallet_connection::WalletConnection;
 use anyhow::{Context, Result};
+#[cfg(test)]
+use base64::Engine;
 use regex::Regex;
-
-use crate::device::{ActiveDeviceSession, ConnectionMode};
-
-#[cfg(windows)]
-unsafe extern "system" {
-    fn setsockopt(s: usize, level: i32, optname: i32, optval: *const i8, optlen: i32) -> i32;
-}
-
-#[cfg(windows)]
-const SOL_SOCKET: i32 = 0xffff;
-#[cfg(windows)]
-const SO_RCVTIMEO: i32 = 0x1006;
+use std::{
+    collections::HashSet,
+    fs,
+    io::Read,
+    path::PathBuf,
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SavedCard {
     pub hash: String,
     pub name: String,
 }
-
 pub fn get_cards_storage_path() -> PathBuf {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .unwrap_or_else(|_| r"C:\Users\Default\AppData\Local".to_string());
-    let dir = PathBuf::from(local_app_data).join("AirCard");
-    let _ = fs::create_dir_all(&dir);
-    dir.join("cards.json")
+    PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap_or_else(|| ".".into()))
+        .join("AirCard")
+        .join("cards.json")
 }
-
-pub fn is_valid_card_hash(h: &str) -> bool {
-    let trimmed = h.trim_matches(['\'', '"']).trim_end_matches(['.', ',']);
-    let len = trimmed.len();
-    // Real Apple Wallet card hashes are SHA-1 (27-28 chars) or SHA-256 (43-44 chars)
-    if len != 27 && len != 28 && len != 43 && len != 44 {
-        return false;
-    }
-
-    // Must be base64 alphabet characters
-    if !trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '-' || c == '_' || c == '=') {
-        return false;
-    }
-
-    // Reject strings with multiple underscores or hyphens (typical of system asset/bundle names)
-    if trimmed.chars().filter(|&c| c == '_').count() > 1 || trimmed.chars().filter(|&c| c == '-').count() > 2 {
-        return false;
-    }
-
-    // Reject obvious system identifiers, bundle IDs and common keywords
-    let lower = trimmed.to_lowercase();
-    if lower.contains("mobileasset")
-        || lower.contains("com_apple")
-        || lower.contains("com.")
-        || lower.contains("apple.")
-        || lower.contains("curtain")
-        || lower.contains("binder")
-        || lower.contains("optimizer")
-        || lower.contains("system")
-        || lower.contains("uaf")
-        || lower.contains("siri")
-        || lower.contains("dialog")
-        || lower.contains("planner")
-        || lower.contains("linguistic")
-        || lower.contains("timing")
-        || lower.contains("model")
-        || lower.contains("translation")
-        || lower.contains("visual")
-        || lower.contains("device")
-        || lower.contains("override")
-        || lower.contains("motion")
-        || lower.contains("search")
+fn normalized_hash(h: &str) -> Option<String> {
+    let h = h.trim_matches(['\'', '"']).trim_end_matches(['.', ',']);
+    // Preserve opaque Wallet path identifiers, including original padding.
+    if !(20..=44).contains(&h.len())
+        || h.len() == 36 && h.contains('-')
+        || !h
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"+-_=".contains(&b))
+        || h.trim_end_matches('=').contains('=')
+        || h.ends_with("===")
+        || h.trim_end_matches('=')
+            .bytes()
+            .all(|b| b == h.as_bytes()[0])
     {
-        return false;
+        return None;
     }
-
-    // '=' can only appear at the end
-    if let Some(pos) = trimmed.find('=') {
-        if pos < len - 2 {
-            return false;
-        }
+    if DUMMY_HASHES
+        .iter()
+        .any(|dummy| dummy.trim_end_matches('=') == h.trim_end_matches('='))
+    {
+        return None;
     }
-
-    // Normalize URL-safe base64 and pad
-    let mut b64 = trimmed.replace('-', "+").replace('_', "/");
-    while b64.len() % 4 != 0 {
-        b64.push('=');
-    }
-
-    use base64::Engine;
-    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&b64) {
-        // Must be exactly 20 bytes (SHA-1) or 32 bytes (SHA-256)
-        if decoded.len() == 20 || decoded.len() == 32 {
-            // Reject trivial all-identical bytes
-            if decoded.iter().all(|&b| b == decoded[0]) {
-                return false;
-            }
-
-            // Cryptographic hashes have high byte entropy:
-            // 1. Must contain both bytes with MSB set (>= 128) and MSB clear (< 128).
-            let has_high = decoded.iter().any(|&b| b >= 128);
-            let has_low = decoded.iter().any(|&b| b < 128);
-            if !has_high || !has_low {
-                return false;
-            }
-
-            // 2. Must contain at least 12 distinct byte values in 20 bytes
-            let mut unique_bytes = std::collections::HashSet::new();
-            for &b in &decoded {
-                unique_bytes.insert(b);
-            }
-            if unique_bytes.len() < 12 {
-                return false;
-            }
-
-            if DUMMY_HASHES.contains(&trimmed) || DUMMY_HASHES.iter().any(|d| d.trim_end_matches('=') == trimmed) {
-                return false;
-            }
-            return true;
-        }
-    }
-
-    false
+    Some(h.to_owned())
 }
-
+pub fn is_valid_card_hash(h: &str) -> bool {
+    normalized_hash(h).is_some()
+}
 pub fn load_saved_cards() -> Vec<SavedCard> {
+    fs::read(get_cards_storage_path())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Vec<SavedCard>>(&b).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| is_valid_card_hash(&c.hash))
+        .collect()
+}
+fn save_cards(cards: &[SavedCard]) -> Result<()> {
     let path = get_cards_storage_path();
-    if let Ok(content) = fs::read_to_string(&path) {
-        if let Ok(cards) = serde_json::from_str::<Vec<SavedCard>>(&content) {
-            let valid_cards: Vec<SavedCard> = cards.into_iter().filter(|c| is_valid_card_hash(&c.hash)).collect();
-            // Automatically purge corrupted or garbage entries from disk
-            save_saved_cards(&valid_cards);
-            return valid_cards;
-        }
-    }
-    Vec::new()
+    fs::create_dir_all(path.parent().unwrap())?;
+    fs::write(path, serde_json::to_vec_pretty(cards)?)?;
+    Ok(())
 }
-
-pub fn save_saved_cards(cards: &[SavedCard]) {
-    let path = get_cards_storage_path();
-    let mut unique = Vec::new();
-    let mut seen = HashSet::new();
-    for c in cards {
-        if is_valid_card_hash(&c.hash) && seen.insert(c.hash.clone()) {
-            unique.push(c.clone());
-        }
-    }
-    if let Ok(json) = serde_json::to_string_pretty(&unique) {
-        let _ = fs::write(path, json);
-    }
-}
-
-pub fn add_or_update_card(hash: &str, name: &str) {
-    if !is_valid_card_hash(hash) {
-        return;
-    }
-    let mut cards = load_saved_cards();
-    if let Some(existing) = cards.iter_mut().find(|c| c.hash == hash) {
-        if !name.is_empty() && (existing.name.is_empty() || existing.name.starts_with("Card ")) {
-            existing.name = name.to_string();
-        }
-    } else {
-        cards.push(SavedCard {
-            hash: hash.to_string(),
-            name: if name.is_empty() {
-                format!("Card {}", cards.len() + 1)
-            } else {
-                name.to_string()
-            },
-        });
-    }
-    save_saved_cards(&cards);
-}
-
+const DUMMY_HASHES: &[&str] = &[
+    "M6nDwZrkYbFlsodLgCbvyFZQ1cc=",
+    "kJL-D0rr-SZhbj2c8nK-OQ9hCMY=",
+    "hwAtAmHKYwsQrJbT5cTNDsaxVME=",
+];
 const WALLET_KEYWORDS: &[&str] = &[
     "passd",
     "passbook",
@@ -186,261 +82,272 @@ const WALLET_KEYWORDS: &[&str] = &[
     "wallet",
     "/cards/",
     "/passes/",
+    ".pkpass",
 ];
-
-const DUMMY_HASHES: &[&str] = &[
-    "M6nDwZrkYbFlsodLgCbvyFZQ1cc=",
-    "kJL-D0rr-SZhbj2c8nK-OQ9hCMY=",
-    "hwAtAmHKYwsQrJbT5cTNDsaxVME=",
-];
-
-use std::sync::LazyLock;
-
-static DESC_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(?:description|localizedDescription|passName|title)\s*[:=]\s*['"]([^'"]+)['"]"#)
-        .unwrap()
+static NAME: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?i)(?:localizedDescription|description|passName|title)\s*[:=]\s*['"]([^'"]+)['"]"#,
+    )
+    .unwrap()
 });
-
-static CARD_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+static HIDDEN_IDENTIFIER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:pass\s+uniqueID|passUniqueIdentifier|passIdentifier|cardIdentifier|card[_\s]?hash|pass[_\s]?hash)\s*[:=]?\s*<private>").unwrap()
+});
+static HASH_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     vec![
-        Regex::new(r"/(?:Cards|Passes/Cards)/([A-Za-z0-9+/_-]{27,44})(?:\.pkpass|\.cache|\.pkcache|/|\s|\x22|'|\)|,|$)").unwrap(),
-        Regex::new(r"/([A-Za-z0-9+/_-]{27,44})\.(?:pkpass|cache|pkcache)").unwrap(),
-        Regex::new(r"(?:^|[^A-Za-z0-9+/_-])([A-Za-z0-9+/_-]{27}=)(?:$|[^A-Za-z0-9+/_-])").unwrap(),
-        Regex::new(r"(?i)(?:card[_\s]?(?:hash|id)|pass[_\s]?(?:hash|id)|unique[_\s]?id)\s*[:=]\s*['\x22]?([A-Za-z0-9+=_-]{27,44})").unwrap(),
-    ]
+    Regex::new(r#"(?i)/(?:Cards|Passes/Cards)/([A-Za-z0-9+_=-]{20,44})(?:\.pkpass|\.pkcache|\.cache|/|\s|["'),]|$)"#).unwrap(),
+    Regex::new(r#"/([A-Za-z0-9+_=-]{20,44})\.(?:pkpass|pkcache|cache)"#).unwrap(),
+    Regex::new(r#"(?i)(?:card[_\s]?(?:hash|id)|pass[_\s]?(?:hash|id)|unique[_\s]?(?:id|identifier)|passUniqueIdentifier|passIdentifier|cardIdentifier)\s*(?:[:=]\s*|\s+)['"]?([A-Za-z0-9+_=-]{20,44})(?:[^A-Za-z0-9+/_=-]|$)"#).unwrap(),
+    Regex::new(r#"(?:^|[^A-Za-z0-9+/_=-])([A-Za-z0-9+/_-]{27}=|[A-Za-z0-9+/_-]{43}=)(?:[^A-Za-z0-9+/_=-]|$)"#).unwrap(),
+]
 });
-
 pub fn extract_card_name_from_line(line: &str) -> Option<String> {
-    if let Some(caps) = DESC_RE.captures(line) {
-        if let Some(m) = caps.get(1) {
-            let name = m.as_str().trim();
-            if name.len() > 1 && !name.to_lowercase().contains("<private>") {
-                return Some(name.to_string());
-            }
-        }
-    }
-    None
+    NAME.captures(line)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().trim().to_owned())
+        .filter(|s| s.len() > 1 && !s.to_lowercase().contains("<private>"))
 }
-
-pub fn extract_card_hash_from_line(line: &str) -> Option<String> {
+pub fn extract_card_hashes(line: &str) -> Vec<String> {
     let lower = line.to_lowercase();
-    let has_wallet = WALLET_KEYWORDS.iter().any(|k| lower.contains(k));
-    if !has_wallet {
-        return None;
+    if !WALLET_KEYWORDS.iter().any(|k| lower.contains(k)) {
+        return vec![];
     }
-
-    for r in CARD_REGEXES.iter() {
-        if let Some(caps) = r.captures(line) {
-            if let Some(m) = caps.get(1) {
-                let h = m.as_str().trim().trim_matches(['\'', '"']).trim_end_matches(['.', ',']);
-                if is_valid_card_hash(h) {
-                    let mut norm = h.to_string();
-                    if norm.len() == 27 {
-                        norm.push('=');
-                    }
-                    return Some(norm);
+    let mut hashes = Vec::new();
+    let mut seen = HashSet::new();
+    for pattern in HASH_PATTERNS.iter() {
+        for c in pattern.captures_iter(line) {
+            if let Some(hash) = c.get(1).and_then(|m| normalized_hash(m.as_str())) {
+                if seen.insert(hash.clone()) {
+                    hashes.push(hash)
                 }
             }
         }
     }
-
-    None
+    hashes
 }
-
-pub fn scan_syslog_for_cards<F, L>(
+/// Bound unterminated messages and preserve UTF-8 across USB reads.
+#[derive(Default)]
+struct LineDecoder {
+    pending: Vec<u8>,
+    discarding: bool,
+}
+impl LineDecoder {
+    fn feed(&mut self, bytes: &[u8], mut line: impl FnMut(&str)) {
+        for b in bytes {
+            if *b == b'\n' || *b == 0 {
+                if !self.discarding && !self.pending.is_empty() {
+                    line(&String::from_utf8_lossy(&self.pending));
+                }
+                self.pending.clear();
+                self.discarding = false;
+            } else if *b != b'\r' && !self.discarding {
+                if self.pending.len() < 256 * 1024 {
+                    self.pending.push(*b)
+                } else {
+                    self.pending.clear();
+                    self.discarding = true;
+                }
+            }
+        }
+    }
+}
+pub fn scan_syslog_for_cards<F: FnMut(String, String), L: FnMut(String)>(
     udid: Option<&str>,
-    connection_mode: ConnectionMode,
-    stop_flag: Arc<AtomicBool>,
+    connection_mode: crate::device::ConnectionMode,
+    stop: Arc<AtomicBool>,
     mut on_card_found: F,
     mut log: L,
-) -> Result<()>
-where
-    F: FnMut(String, String),
-    L: FnMut(String),
-{
-    log("Connecting to device session for syslog monitoring...".to_string());
-    let session = ActiveDeviceSession::open(udid, connection_mode)
-        .context("Failed to connect to device for syslog scanning")?;
-    log(format!(
-        "Connected to {} over {}.",
-        session.udid,
-        session.transport.label()
-    ));
-    let libs = &session.libs;
-    log("Starting com.apple.syslog_relay service on device...".to_string());
-    let service_conn = session.start_service("com.apple.syslog_relay")
-        .context("Failed to start com.apple.syslog_relay service")?;
-
-    let raw_socket = unsafe { (libs.amd_service_connection_get_socket)(service_conn) };
-    if raw_socket <= 0 {
-        unsafe { (libs.amd_service_connection_invalidate)(service_conn) };
-        anyhow::bail!("Invalid syslog socket");
+) -> Result<()> {
+    let opened = WalletConnection::open(udid, connection_mode, &stop, &mut log);
+    if stop.load(Ordering::Relaxed) {
+        log("Scan stopped.".into());
+        return Ok(());
     }
-
-    // Set socket receive timeout
-    #[cfg(windows)]
-    unsafe {
-        let timeout_ms: u32 = 500;
-        setsockopt(
-            raw_socket as usize,
-            SOL_SOCKET,
-            SO_RCVTIMEO,
-            &timeout_ms as *const u32 as *const i8,
-            std::mem::size_of::<u32>() as i32,
-        );
-    }
-
-    log("Syslog relay established. Listening for Wallet & PassKit events...".to_string());
-    log("Tip: Open Apple Wallet on your iPhone or tap your card to trigger events.".to_string());
-
-    let mut buffer = [0u8; 8192];
-    let mut line_acc = Vec::with_capacity(1024);
-
-    while !stop_flag.load(Ordering::Relaxed) {
-        let bytes_read = unsafe {
-            (libs.amd_service_connection_receive)(
-                service_conn,
-                buffer.as_mut_ptr(),
-                buffer.len(),
-            )
-        };
-
-        if bytes_read > 0 {
-            let slice = &buffer[..bytes_read as usize];
-            for &b in slice {
-                if b == b'\n' || b == b'\0' {
-                    if !line_acc.is_empty() {
-                        let line = String::from_utf8_lossy(&line_acc);
-                        if let Some(hash) = extract_card_hash_from_line(&line) {
-                            let name = extract_card_name_from_line(&line).unwrap_or_default();
-                            log(format!(
-                                "Found card pass! Name: '{}', Hash: {}",
-                                if name.is_empty() { "Unknown" } else { &name },
-                                hash
-                            ));
-                            add_or_update_card(&hash, &name);
-                            on_card_found(hash, name);
-                        }
-                        line_acc.clear();
-                    }
-                } else if b != b'\r' {
-                    line_acc.push(b);
-                }
+    let mut connection = opened.context("Wallet scan connection failed")?;
+    let mut decoder = LineDecoder::default();
+    let mut buf = [0; 16384];
+    let mut seen = HashSet::new();
+    let mut saved = load_saved_cards();
+    let mut lines = 0usize;
+    let mut wallet_lines = 0usize;
+    let mut hidden_identifier_lines = 0usize;
+    let mut report = Instant::now();
+    let mut privacy_reported = false;
+    while !stop.load(Ordering::Relaxed) {
+        match connection.stream.read(&mut buf) {
+            Ok(0) => {
+                anyhow::bail!("iPhone closed the wallet log connection. Reconnect and scan again")
             }
-        } else if bytes_read == 0 {
-            log("Syslog socket closed by device.".to_string());
-            break; // Socket closed
-        } else {
-            // Timeout or transient: sleep briefly to avoid pegging CPU
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            Ok(n) => decoder.feed(&buf[..n], |line| {
+                lines += 1;
+                let lower = line.to_lowercase();
+                if WALLET_KEYWORDS.iter().any(|k| lower.contains(k)) {
+                    wallet_lines += 1;
+                    if HIDDEN_IDENTIFIER.is_match(line) {
+                        hidden_identifier_lines += 1;
+                    }
+                }
+                let hashes = extract_card_hashes(line);
+                let name = if hashes.len() == 1 {
+                    extract_card_name_from_line(line).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                for hash in hashes {
+                    if !seen.insert(hash.clone()) {
+                        continue;
+                    }
+                    let card_name = if name.is_empty() {
+                        saved
+                            .iter()
+                            .find(|c| c.hash == hash)
+                            .map(|c| c.name.clone())
+                            .unwrap_or_else(|| format!("Card {}", saved.len() + 1))
+                    } else {
+                        name.clone()
+                    };
+                    if !saved.iter().any(|c| c.hash == hash) {
+                        saved.push(SavedCard {
+                            hash: hash.clone(),
+                            name: card_name.clone(),
+                        });
+                    }
+                    if let Err(e) = save_cards(&saved) {
+                        log(format!("Card detected, but saving it failed: {e:#}"));
+                    }
+                    log(format!(
+                        "Wallet card detected: {card_name}. Hash is ready in the card field."
+                    ));
+                    on_card_found(hash, card_name);
+                }
+            }),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(e) => return Err(e).context("Wallet log stream was interrupted"),
+        }
+        if report.elapsed() >= Duration::from_secs(10) {
+            log(format!(
+                "Scan active: {lines} log lines, {wallet_lines} Wallet lines, {} cards detected.",
+                seen.len()
+            ));
+            if hidden_identifier_lines > 0 && !privacy_reported {
+                privacy_reported = true;
+                log("Wallet received the card selection, but iOS hid its identifier as <private>. For a supported transit card, keep scanning and open Wallet > card > (...) > Card Details > Turn On Service Mode. Other card types may not offer this. Previously detected cards do not mean all cards were found.".into());
+            } else if seen.is_empty() {
+                log(if wallet_lines == 0 {
+                    "No Wallet activity yet. Open Wallet on iPhone and tap a card."
+                } else {
+                    "Wallet activity received, but no usable card identifier yet. Open card details while scanning."
+                }.into());
+            }
+            report = Instant::now();
         }
     }
-
-    unsafe {
-        (libs.amd_service_connection_invalidate)(service_conn);
-    }
-    log("Syslog scan stopped.".to_string());
-
+    log(format!("Scan stopped. {} cards detected.", seen.len()));
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    const A: &str = "OM6NYhwXMZrAw0sRUjR62wmF4ZQ=";
+    const B: &str = "d64fKk0kyHWP11IWV2GRLud4XQk=";
     #[test]
-    fn test_extract_card_hash() {
-        let line1 = "passd[123]: Card hash: 'OM6NYhwXMZrAw0sRUjR62wmF4ZQ=' loaded";
+    fn selection_without_colon_and_specific_redaction() {
+        let hash = "aB12cD34eF56gH78iJ90kL";
+        assert_eq!(extract_card_hashes(&format!("Passbook: pass uniqueID {hash}, accountID (null)")), vec![hash]);
+        assert!(HIDDEN_IDENTIFIER.is_match("Passbook: pass uniqueID <private>, accountID (null)"));
+        assert!(HIDDEN_IDENTIFIER.is_match("PassKitCore: selected pass uniqueID: <private>"));
+        assert!(!HIDDEN_IDENTIFIER.is_match("passd: description=<private>"));
+        assert!(!HIDDEN_IDENTIFIER.is_match(&format!("passd: pass uniqueID {hash}, title=<private>")));
+    }
+    #[test]
+    fn opaque_paths_identifiers_and_redaction_are_independent() {
+        let opaque = "aB12cD34eF56gH78iJ90kL";
         assert_eq!(
-            extract_card_hash_from_line(line1),
-            Some("OM6NYhwXMZrAw0sRUjR62wmF4ZQ=".to_string())
+            extract_card_hashes(&format!("passd: title=<private> /Cards/{opaque}.pkpass")),
+            vec![opaque]
         );
-
-        let line2 = "nanopassd: Accessing /var/mobile/Library/Passes/Cards/d64fKk0kyHWP11IWV2GRLud4XQk.pkpass";
         assert_eq!(
-            extract_card_hash_from_line(line2),
-            Some("d64fKk0kyHWP11IWV2GRLud4XQk=".to_string())
+            extract_card_hashes(&format!("passd: passUniqueIdentifier='{A}'")),
+            vec![A]
         );
-
-        // Dummy/unrelated lines should be ignored
-        let dummy = "passd: Using dummy hash hwAtAmHKYwsQrJbT5cTNDsaxVME=";
-        assert_eq!(extract_card_hash_from_line(dummy), None);
-    }
-
-    #[test]
-    fn test_extract_card_name() {
-        let line = "passd[456]: Pass with localizedDescription = 'Apple Card' updated";
         assert_eq!(
-            extract_card_name_from_line(line),
-            Some("Apple Card".to_string())
+            extract_card_hashes(&format!("passd: uniqueIdentifier='{B}'")),
+            vec![B]
+        );
+        assert!(!is_valid_card_hash("9qzwRxHhdY6jmi/stAk+Sd8X08g="));
+    }
+    #[test]
+    fn padded_paths_and_multiple_cards() {
+        assert_eq!(
+            extract_card_hashes(&format!(
+                "passd: /var/mobile/Library/Passes/Cards/{A}.pkpass /Cards/{B}.pkcache"
+            )),
+            vec![A, B]
         );
     }
-
     #[test]
-    fn test_is_valid_card_hash() {
-        // Real card hashes
-        assert!(is_valid_card_hash("OM6NYhwXMZrAw0sRUjR62wmF4ZQ="));
-        assert!(is_valid_card_hash("d64fKk0kyHWP11IWV2GRLud4XQk="));
-        assert!(is_valid_card_hash("d64fKk0kyHWP11IWV2GRLud4XQk"));
-
-        // System garbage strings that must be rejected
-        let garbage = [
-            "PresentationBinderIndirectAccessHosting-",
-            "SB-systemApertureCurtain",
-            "com_apple_MobileAsset_UAF_Translation_Assets",
-            "com_apple_MobileAsset_UAF_FM_Visual",
-            "com_apple_MobileAsset_UAF_DeviceCheck",
-            "com_apple_MobileAsset_UAF_Siri_TextToSpeech",
-            "com_apple_MobileAsset_UAF_Siri_DialogAssets",
-            "com_apple_MobileAsset_UAF_IF_Planner",
-            "SubscriptionOptimizerTimingModels",
-            "com_apple_MobileAsset_UAF_LinguisticData",
-            "com_apple_MobileAsset_UAF_FM_Overrides",
-            "com_apple_MobileAsset_UAF_Siri_Understanding",
-            "com_apple_MobileAsset_UAF_MotionAnomalyFM",
-            "com_apple_MobileAsset_UAF_TKModelMessages",
-            "com_apple_MobileAsset_UAF_Search_ODLA",
-        ];
-
-        for g in garbage {
-            assert!(!is_valid_card_hash(g), "Expected {} to be rejected as card hash", g);
-        }
+    fn sha256_urlsafe_with_many_separators() {
+        let bytes: [u8; 32] = std::array::from_fn(|i| if i % 2 == 0 { 255 } else { (i * 7) as u8 });
+        let h = base64::engine::general_purpose::URL_SAFE.encode(bytes);
+        assert!(h.matches('_').count() > 1);
+        assert!(is_valid_card_hash(&h));
+        assert_eq!(
+            extract_card_hashes(&format!("passd: /Cards/{}.pkpass", h.trim_end_matches('='))),
+            vec![h.trim_end_matches('=').to_owned()]
+        );
     }
-
     #[test]
-    fn test_saved_cards_purging() {
-        let loaded = load_saved_cards();
-        for card in &loaded {
-            assert!(is_valid_card_hash(&card.hash), "Invalid hash was not purged: {}", card.hash);
-        }
+    fn invalid_candidate_does_not_hide_valid_one() {
+        assert_eq!(
+            extract_card_hashes(&format!(
+                "passd: Card hash: AAAAAAAAAAAAAAAAAAAAAAAAAAA=; Card hash: '{A}'"
+            )),
+            vec![A]
+        );
     }
-
     #[test]
-    fn test_syslog_service_receive() {
-        let session = match ActiveDeviceSession::open(None, ConnectionMode::Auto) {
-            Ok(s) => s,
-            Err(e) => {
-                println!("No device connected: {:?}", e);
-                return;
-            }
-        };
-        let libs = &session.libs;
-        let conn = session.start_service("com.apple.syslog_relay").expect("start syslog_relay");
-        let raw_socket = unsafe { (libs.amd_service_connection_get_socket)(conn) };
-        unsafe {
-            let timeout_ms: u32 = 500;
-            setsockopt(
-                raw_socket as usize,
-                SOL_SOCKET,
-                SO_RCVTIMEO,
-                &timeout_ms as *const u32 as *const i8,
-                std::mem::size_of::<u32>() as i32,
-            );
+    fn unrelated_private_dummy_and_malformed() {
+        for line in [
+            format!("networkd: token {A}"),
+            "passd: card hash: <private>".into(),
+            format!("passd: dummy {}", DUMMY_HASHES[0]),
+            "passd: PresentationBinderIndirectAccessHosting-".into(),
+        ] {
+            assert!(extract_card_hashes(&line).is_empty(), "{line}");
         }
-        let mut buf = [0u8; 4096];
-        let start = std::time::Instant::now();
-        let n = unsafe { (libs.amd_service_connection_receive)(conn, buf.as_mut_ptr(), buf.len()) };
-        println!("AMDServiceConnectionReceive returned: {} in {:?}", n, start.elapsed());
-        unsafe { (libs.amd_service_connection_invalidate)(conn) };
+        assert!(!is_valid_card_hash("AAAAAAAAAAAAAAAAAAAAAAAAAAA="));
+        assert!(!is_valid_card_hash("../../etc/passwd"));
+    }
+    #[test]
+    fn fragmented_utf8_nul_crlf_and_oversized_lines() {
+        let text = format!("passd: title='交通卡' card hash: '{A}'\r\npassd: /Cards/{B}.cache\0");
+        let mut d = LineDecoder::default();
+        let mut lines = vec![];
+        for b in text.as_bytes().chunks(1) {
+            d.feed(b, |s| lines.push(s.to_owned()));
+        }
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            extract_card_name_from_line(&lines[0]).as_deref(),
+            Some("交通卡")
+        );
+        assert_eq!(extract_card_hashes(&lines[1]), vec![B]);
+        d.feed(&vec![b'x'; 300_000], |_| panic!("unterminated line"));
+        assert!(d.pending.len() <= 256 * 1024);
+        d.feed(b"\npassd: ok\n", |s| assert_eq!(s, "passd: ok"));
+    }
+    #[test]
+    fn repeated_patterns_are_deduplicated() {
+        assert_eq!(
+            extract_card_hashes(&format!("passd: card hash: '{A}', path /Cards/{A}.pkpass")),
+            vec![A]
+        );
     }
 }

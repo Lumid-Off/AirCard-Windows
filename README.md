@@ -25,16 +25,11 @@
 
 ---
 
-## ⚠️ Troubleshooting & Driver Repair (If Nothing Works)
+## Apple components and troubleshooting
 
-> [!TIP]
-> **iPhone not detected, AirTraffic sync hangs, or operation fails?**  
-> Corrupted or conflicting Apple USB drivers on Windows are the #1 root cause.
-> 1. Download and install **[3uTools](https://www.3u.com/)**.
-> 2. **Disconnect your iPhone** from your PC.
-> 3. In 3uTools, go to **Toolbox ➔ Repair Driver**.
-> 4. Click **Repair Now** and wait for the Apple driver reinstallation to finish.
-> 5. Reconnect your unlocked iPhone, tap **Trust**, and launch **AirCard**.
+Install Apple's 64-bit desktop iTunes components and keep Apple Mobile Device Support available. Verify a trusted device session in iTunes. Native AirTraffic authentication still uses Apple's installed libraries; this build does not redistribute or replace them. A visible device name does not establish that synchronization is ready; use the reported failure stage when diagnosing a problem. No third-party driver repair utility is required by this change.
+
+For supported transit cards with redacted identifiers, keep scanning while opening Wallet > card > (...) > Card Details > Turn On Service Mode. Availability varies. Hidden identifiers cannot be reconstructed.
 
 ---
 
