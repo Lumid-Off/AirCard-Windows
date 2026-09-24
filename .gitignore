@@ -22,3 +22,14 @@ Desktop.ini
 # Logs and temp files
 *.log
 *.tmp
+
+# Community Edition local/generated files
+/target/
+*.log
+*.rar
+*.pkpass
+Suica_original.pdf
+*_pkpass_export.zip
+aircard.exe
+.DS_Store
+Thumbs.db

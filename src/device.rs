@@ -7,9 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use crate::apple::{
-    AMDServiceConnectionRef, AMDeviceRef, AppleLibraries, get_apple_libraries,
-};
+use crate::apple::{AMDServiceConnectionRef, AMDeviceRef, AppleLibraries, get_apple_libraries};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DeviceTransport {
@@ -81,7 +79,10 @@ impl DeviceInfo {
     }
 
     pub fn supports(&self, mode: ConnectionMode) -> bool {
-        self.transports.iter().copied().any(|transport| mode.accepts(transport))
+        self.transports
+            .iter()
+            .copied()
+            .any(|transport| mode.accepts(transport))
     }
 
     pub fn transport_summary(&self) -> String {
@@ -123,13 +124,25 @@ pub fn query_usbmux_devices() -> Result<Vec<UsbmuxDeviceEntry>> {
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
 
     let mut req_dict = HashMap::new();
-    req_dict.insert("MessageType".to_string(), plist::Value::String("ListDevices".to_string()));
-    req_dict.insert("ClientVersionString".to_string(), plist::Value::String("aircard".to_string()));
-    req_dict.insert("ProgName".to_string(), plist::Value::String("aircard".to_string()));
+    req_dict.insert(
+        "MessageType".to_string(),
+        plist::Value::String("ListDevices".to_string()),
+    );
+    req_dict.insert(
+        "ClientVersionString".to_string(),
+        plist::Value::String("aircard".to_string()),
+    );
+    req_dict.insert(
+        "ProgName".to_string(),
+        plist::Value::String("aircard".to_string()),
+    );
 
     let mut plist_bytes = Vec::new();
-    plist::to_writer_xml(&mut plist_bytes, &plist::Value::Dictionary(req_dict.into_iter().collect()))
-        .context("Failed to serialize ListDevices request")?;
+    plist::to_writer_xml(
+        &mut plist_bytes,
+        &plist::Value::Dictionary(req_dict.into_iter().collect()),
+    )
+    .context("Failed to serialize ListDevices request")?;
 
     let length = (plist_bytes.len() + 16) as u32;
     let version = 1u32;
@@ -150,7 +163,12 @@ pub fn query_usbmux_devices() -> Result<Vec<UsbmuxDeviceEntry>> {
     let mut resp_header = [0u8; 16];
     stream.read_exact(&mut resp_header)?;
 
-    let resp_len = u32::from_le_bytes([resp_header[0], resp_header[1], resp_header[2], resp_header[3]]) as usize;
+    let resp_len = u32::from_le_bytes([
+        resp_header[0],
+        resp_header[1],
+        resp_header[2],
+        resp_header[3],
+    ]) as usize;
     if resp_len < 16 {
         bail!("Invalid usbmux response length: {}", resp_len);
     }
@@ -161,8 +179,13 @@ pub fn query_usbmux_devices() -> Result<Vec<UsbmuxDeviceEntry>> {
     let val = plist::Value::from_reader(std::io::Cursor::new(payload))
         .context("Failed to parse usbmux ListDevices response plist")?;
 
-    let root_dict = val.as_dictionary().context("Expected dictionary in usbmux response")?;
-    let device_list = root_dict.get("DeviceList").and_then(|v| v.as_array()).context("Expected DeviceList array in usbmux response")?;
+    let root_dict = val
+        .as_dictionary()
+        .context("Expected dictionary in usbmux response")?;
+    let device_list = root_dict
+        .get("DeviceList")
+        .and_then(|v| v.as_array())
+        .context("Expected DeviceList array in usbmux response")?;
 
     let mut result = Vec::new();
     for entry in device_list {
@@ -253,14 +276,17 @@ pub fn list_connected_devices() -> Result<Vec<DeviceInfo>> {
             (libs.cf_release)(dev);
         }
 
-        merge_device_info(&mut result, DeviceInfo {
-            udid: entry.udid,
-            name,
-            product_type,
-            ios_version,
-            build_version,
-            transports: vec![entry.transport],
-        });
+        merge_device_info(
+            &mut result,
+            DeviceInfo {
+                udid: entry.udid,
+                name,
+                product_type,
+                ios_version,
+                build_version,
+                transports: vec![entry.transport],
+            },
+        );
     }
 
     Ok(result)
@@ -276,7 +302,9 @@ fn merge_device_info(devices: &mut Vec<DeviceInfo>, incoming: DeviceInfo) {
                 existing.transports.push(transport);
             }
         }
-        existing.transports.sort_by_key(|transport| transport_priority(*transport));
+        existing
+            .transports
+            .sort_by_key(|transport| transport_priority(*transport));
 
         if existing.name == "iPhone" && incoming.name != "iPhone" {
             existing.name = incoming.name;
@@ -319,13 +347,10 @@ fn ordered_candidates(
     entries
 }
 
-pub fn ensure_transport_available(
-    udid: &str,
-    transport: DeviceTransport,
-) -> Result<()> {
-    let available = query_usbmux_devices()?.into_iter().any(|entry| {
-        entry.udid.eq_ignore_ascii_case(udid) && entry.transport == transport
-    });
+pub fn ensure_transport_available(udid: &str, transport: DeviceTransport) -> Result<()> {
+    let available = query_usbmux_devices()?
+        .into_iter()
+        .any(|entry| entry.udid.eq_ignore_ascii_case(udid) && entry.transport == transport);
     if available {
         return Ok(());
     }
@@ -410,7 +435,9 @@ impl ActiveDeviceSession {
                 if transport == DeviceTransport::Wifi {
                     (libs.am_device_disconnect)(device);
                     (libs.cf_release)(device);
-                    bail!("WiFi device is not paired. Connect it over USB once and trust this computer first");
+                    bail!(
+                        "WiFi device is not paired. Connect it over USB once and trust this computer first"
+                    );
                 }
                 (libs.am_device_pair)(device);
             }
@@ -460,7 +487,11 @@ impl ActiveDeviceSession {
             )
         };
         if status != 0 || service_conn.is_null() {
-            bail!("AMDeviceSecureStartService('{}') failed with code {}", service_name, status);
+            bail!(
+                "AMDeviceSecureStartService('{}') failed with code {}",
+                service_name,
+                status
+            );
         }
         Ok(service_conn)
     }
@@ -551,7 +582,9 @@ mod tests {
                 }
             }
             Err(e) => {
-                println!("Apple Mobile Device Support not installed on this host (expected in CI): {e}");
+                println!(
+                    "Apple Mobile Device Support not installed on this host (expected in CI): {e}"
+                );
             }
         }
     }

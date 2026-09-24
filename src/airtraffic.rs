@@ -20,17 +20,33 @@ unsafe extern "system" {
 fn generate_uuid_v4() -> String {
     let mut bytes = [0u8; 16];
     unsafe {
-        let _ = BCryptGenRandom(std::ptr::null_mut(), bytes.as_mut_ptr(), bytes.len() as u32, 2);
+        let _ = BCryptGenRandom(
+            std::ptr::null_mut(),
+            bytes.as_mut_ptr(),
+            bytes.len() as u32,
+            2,
+        );
     }
     bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
     bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5],
-        bytes[6], bytes[7],
-        bytes[8], bytes[9],
-        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
     )
 }
 
@@ -77,14 +93,20 @@ where
     loop {
         let elapsed = start.elapsed();
         if elapsed >= Duration::from_secs(total_timeout_secs) {
-            bail!("AirTraffic sync timed out ({}s). 1) Unlock iPhone screen and keep it on. 2) Open Apple Books app on iPhone once. 3) Close iTunes on PC.", total_timeout_secs);
+            bail!(
+                "AirTraffic sync timed out ({}s). 1) Unlock iPhone screen and keep it on. 2) Open Apple Books app on iPhone once. 3) Close iTunes on PC.",
+                total_timeout_secs
+            );
         }
         let timeout = Duration::from_secs(total_timeout_secs) - elapsed;
         match rx.recv_timeout(timeout) {
             Ok(SyncEvent::Log(msg)) => log(&msg),
             Ok(SyncEvent::Done(res)) => return res,
             Err(_) => {
-                bail!("AirTraffic sync timed out ({}s). 1) Unlock iPhone screen and keep it on. 2) Open Apple Books app on iPhone once. 3) Close iTunes on PC.", total_timeout_secs);
+                bail!(
+                    "AirTraffic sync timed out ({}s). 1) Unlock iPhone screen and keep it on. 2) Open Apple Books app on iPhone once. 3) Close iTunes on PC.",
+                    total_timeout_secs
+                );
             }
         }
     }
@@ -113,7 +135,11 @@ where
         bail!("ATHostConnectionCreate failed for UDID: {}", udid);
     }
 
-    let retry_scale = if transport == DeviceTransport::Wifi { 2 } else { 1 };
+    let retry_scale = if transport == DeviceTransport::Wifi {
+        2
+    } else {
+        1
+    };
     let mut run_sync = || -> Result<()> {
         log("Waiting for SyncAllowed from iPhone (keep screen unlocked)...");
         // 1. Wait for SyncAllowed message
@@ -135,23 +161,49 @@ where
             }
         }
         if !sync_allowed {
-            bail!("AirTraffic: SyncAllowed message not received. Ensure iPhone screen is unlocked and Books app is opened.");
+            bail!(
+                "AirTraffic: SyncAllowed message not received. Ensure iPhone screen is unlocked and Books app is opened."
+            );
         }
 
         log("SyncAllowed received! Handshaking Books sync request...");
         // 2. Send HostInfo
         let mut host_info_dict = HashMap::new();
-        host_info_dict.insert("Type".to_string(), plist::Value::String("iTunes".to_string()));
-        host_info_dict.insert("Version".to_string(), plist::Value::String("13.7.0.161".to_string()));
-        host_info_dict.insert("MacOSVersion".to_string(), plist::Value::String("Windows NT 10.0".to_string()));
-        host_info_dict.insert("SyncHostName".to_string(), plist::Value::String("airlift".to_string()));
-        host_info_dict.insert("LibraryID".to_string(), plist::Value::String(generate_uuid_v4()));
-        host_info_dict.insert("SyncedDataclasses".to_string(), plist::Value::Array(vec![plist::Value::String("Book".to_string())]));
-        host_info_dict.insert("SyncedAssetTypes".to_string(), plist::Value::Array(vec![plist::Value::String("Book".to_string())]));
+        host_info_dict.insert(
+            "Type".to_string(),
+            plist::Value::String("iTunes".to_string()),
+        );
+        host_info_dict.insert(
+            "Version".to_string(),
+            plist::Value::String("13.7.0.161".to_string()),
+        );
+        host_info_dict.insert(
+            "MacOSVersion".to_string(),
+            plist::Value::String("Windows NT 10.0".to_string()),
+        );
+        host_info_dict.insert(
+            "SyncHostName".to_string(),
+            plist::Value::String("airlift".to_string()),
+        );
+        host_info_dict.insert(
+            "LibraryID".to_string(),
+            plist::Value::String(generate_uuid_v4()),
+        );
+        host_info_dict.insert(
+            "SyncedDataclasses".to_string(),
+            plist::Value::Array(vec![plist::Value::String("Book".to_string())]),
+        );
+        host_info_dict.insert(
+            "SyncedAssetTypes".to_string(),
+            plist::Value::Array(vec![plist::Value::String("Book".to_string())]),
+        );
         host_info_dict.insert("Wakeable".to_string(), plist::Value::Boolean(false));
 
         let mut host_info_bytes = Vec::new();
-        plist::to_writer_binary(&mut host_info_bytes, &plist::Value::Dictionary(host_info_dict.into_iter().collect()))?;
+        plist::to_writer_binary(
+            &mut host_info_bytes,
+            &plist::Value::Dictionary(host_info_dict.into_iter().collect()),
+        )?;
         let cf_host_info = libs.create_cf_plist_from_bytes(&host_info_bytes)?;
 
         unsafe {
@@ -161,11 +213,17 @@ where
 
         // 3. Send SyncRequest
         let mut dataclasses_bytes = Vec::new();
-        plist::to_writer_binary(&mut dataclasses_bytes, &plist::Value::Array(vec![plist::Value::String("Book".to_string())]))?;
+        plist::to_writer_binary(
+            &mut dataclasses_bytes,
+            &plist::Value::Array(vec![plist::Value::String("Book".to_string())]),
+        )?;
         let cf_dataclasses = libs.create_cf_plist_from_bytes(&dataclasses_bytes)?;
 
         let mut anchors_bytes = Vec::new();
-        plist::to_writer_binary(&mut anchors_bytes, &plist::Value::Dictionary(HashMap::<String, plist::Value>::new().into_iter().collect()))?;
+        plist::to_writer_binary(
+            &mut anchors_bytes,
+            &plist::Value::Dictionary(HashMap::<String, plist::Value>::new().into_iter().collect()),
+        )?;
         let cf_anchors = libs.create_cf_plist_from_bytes(&anchors_bytes)?;
 
         unsafe {
@@ -202,11 +260,18 @@ where
         let mut sync_types_dict = HashMap::new();
         sync_types_dict.insert("Book".to_string(), plist::Value::Integer(1.into()));
         let mut sync_types_bytes = Vec::new();
-        plist::to_writer_binary(&mut sync_types_bytes, &plist::Value::Dictionary(sync_types_dict.into_iter().collect()))?;
+        plist::to_writer_binary(
+            &mut sync_types_bytes,
+            &plist::Value::Dictionary(sync_types_dict.into_iter().collect()),
+        )?;
         let cf_sync_types = libs.create_cf_plist_from_bytes(&sync_types_bytes)?;
 
         unsafe {
-            (libs.at_host_connection_send_metadata_sync_finished)(conn, cf_sync_types.raw, cf_anchors.raw);
+            (libs.at_host_connection_send_metadata_sync_finished)(
+                conn,
+                cf_sync_types.raw,
+                cf_anchors.raw,
+            );
         }
 
         // 6. Read AssetManifest
@@ -232,7 +297,10 @@ where
                 break;
             } else if name == "SyncFailed" || name == "SyncFinished" {
                 unsafe { (libs.cf_release)(msg) };
-                bail!("AirTraffic returned unexpected terminating message: {}", name);
+                bail!(
+                    "AirTraffic returned unexpected terminating message: {}",
+                    name
+                );
             }
             unsafe { (libs.cf_release)(msg) };
         }
@@ -251,7 +319,10 @@ where
         let mut available_downloads = Vec::new();
         for entry in book_entries {
             if let Some(dict) = entry.as_dictionary() {
-                let is_dl = dict.get("IsDownload").and_then(|b| b.as_boolean()).unwrap_or(false);
+                let is_dl = dict
+                    .get("IsDownload")
+                    .and_then(|b| b.as_boolean())
+                    .unwrap_or(false);
                 if is_dl {
                     if let Some(asset_id) = dict.get("AssetID").and_then(|s| s.as_string()) {
                         available_downloads.push(asset_id.to_string());

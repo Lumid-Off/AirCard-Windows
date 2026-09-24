@@ -128,7 +128,10 @@ pub fn parse_passthm_file(
             .unwrap_or(&entry_name)
             .to_string();
 
-        if leaf.starts_with('.') || leaf.starts_with('_') || (!leaf.ends_with(".png") && !leaf.ends_with(".jpg") && !leaf.ends_with(".jpeg")) {
+        if leaf.starts_with('.')
+            || leaf.starts_with('_')
+            || (!leaf.ends_with(".png") && !leaf.ends_with(".jpg") && !leaf.ends_with(".jpeg"))
+        {
             continue;
         }
 
@@ -173,12 +176,21 @@ pub fn parse_passthm_file(
 
             let mut add_variant = |prefix: &str, sub: &str| {
                 if sub.is_empty() {
-                    items_dict.insert(format!("{}-{}---white{}.png", prefix, d, bold_suffix), data.clone());
+                    items_dict.insert(
+                        format!("{}-{}---white{}.png", prefix, d, bold_suffix),
+                        data.clone(),
+                    );
                 } else {
-                    items_dict.insert(format!("{}-{}-{}--white{}.png", prefix, d, sub, bold_suffix), data.clone());
+                    items_dict.insert(
+                        format!("{}-{}-{}--white{}.png", prefix, d, sub, bold_suffix),
+                        data.clone(),
+                    );
                     let nospace = sub.replace(' ', "");
                     if nospace != sub {
-                        items_dict.insert(format!("{}-{}-{}--white{}.png", prefix, d, nospace, bold_suffix), data.clone());
+                        items_dict.insert(
+                            format!("{}-{}-{}--white{}.png", prefix, d, nospace, bold_suffix),
+                            data.clone(),
+                        );
                     }
                 }
             };
@@ -186,27 +198,42 @@ pub fn parse_passthm_file(
             if is_ru {
                 for p in &["ru", "other", "en"] {
                     add_variant(p, "");
-                    if !ru_sub.is_empty() { add_variant(p, ru_sub); }
-                    if !en_sub.is_empty() { add_variant(p, en_sub); }
+                    if !ru_sub.is_empty() {
+                        add_variant(p, ru_sub);
+                    }
+                    if !en_sub.is_empty() {
+                        add_variant(p, en_sub);
+                    }
                 }
             } else if is_uk {
                 for p in &["uk", "other", "en"] {
                     add_variant(p, "");
-                    if !uk_sub.is_empty() { add_variant(p, uk_sub); }
-                    if !en_sub.is_empty() { add_variant(p, en_sub); }
+                    if !uk_sub.is_empty() {
+                        add_variant(p, uk_sub);
+                    }
+                    if !en_sub.is_empty() {
+                        add_variant(p, en_sub);
+                    }
                 }
             } else if is_ja {
                 for p in &["ja", "other", "en"] {
                     add_variant(p, "");
-                    if !en_sub.is_empty() { add_variant(p, en_sub); }
+                    if !en_sub.is_empty() {
+                        add_variant(p, en_sub);
+                    }
                 }
             } else if is_en && !is_all {
                 for p in &["en", "other"] {
                     add_variant(p, "");
-                    if !en_sub.is_empty() { add_variant(p, en_sub); }
+                    if !en_sub.is_empty() {
+                        add_variant(p, en_sub);
+                    }
                 }
             } else if is_all {
-                for p in &["en", "other", "ru", "uk", "ja", "es", "fr", "de", "it", "pt", "tr", "pl", "ko", "zh"] {
+                for p in &[
+                    "en", "other", "ru", "uk", "ja", "es", "fr", "de", "it", "pt", "tr", "pl",
+                    "ko", "zh",
+                ] {
                     add_variant(p, "");
                     if *p == "ru" && !ru_sub.is_empty() {
                         add_variant(p, ru_sub);
@@ -233,7 +260,10 @@ pub fn parse_passthm_file(
         bail!("No valid keypad image assets found in passcode theme archive");
     }
 
-    let target_dirs = vec![format!("/var/mobile/Library/Caches/{}", primary_target_version)];
+    let target_dirs = vec![format!(
+        "/var/mobile/Library/Caches/{}",
+        primary_target_version
+    )];
 
     let mut items = Vec::new();
     for tdir in &target_dirs {
@@ -298,21 +328,31 @@ mod tests {
             zip.finish().unwrap();
         }
 
-        let theme = parse_passthm_file(&test_path, None, "Russian (Русский)", false).expect("failed to parse synthetic theme");
+        let theme = parse_passthm_file(&test_path, None, "Russian (Русский)", false)
+            .expect("failed to parse synthetic theme");
         assert_eq!(theme.name, "test_synthetic");
         assert_eq!(theme.detected_version, "TelephonyUI-10");
         assert!(theme.key_previews.contains_key("0"));
         assert!(theme.key_previews.contains_key("2"));
 
-        let leaf_names: Vec<&str> = theme.items.iter().map(|(_, leaf, _)| leaf.as_str()).collect();
+        let leaf_names: Vec<&str> = theme
+            .items
+            .iter()
+            .map(|(_, leaf, _)| leaf.as_str())
+            .collect();
         assert!(leaf_names.contains(&"_big"));
         assert!(leaf_names.contains(&"ru-0---white.png"));
         assert!(leaf_names.contains(&"ru-2-А Б В Г--white.png"));
         assert!(leaf_names.contains(&"en-2-A B C--white.png"));
 
         // Test bold mode
-        let theme_bold = parse_passthm_file(&test_path, None, "Japanese (日本語)", true).expect("failed to parse synthetic bold theme");
-        let bold_leaves: Vec<&str> = theme_bold.items.iter().map(|(_, leaf, _)| leaf.as_str()).collect();
+        let theme_bold = parse_passthm_file(&test_path, None, "Japanese (日本語)", true)
+            .expect("failed to parse synthetic bold theme");
+        let bold_leaves: Vec<&str> = theme_bold
+            .items
+            .iter()
+            .map(|(_, leaf, _)| leaf.as_str())
+            .collect();
         assert!(bold_leaves.contains(&"_big"));
         assert!(bold_leaves.contains(&"ja-0---white-bold.png"));
         assert!(bold_leaves.contains(&"ja-2-A B C--white-bold.png"));

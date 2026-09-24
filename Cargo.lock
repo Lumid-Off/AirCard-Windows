@@ -140,6 +140,7 @@ dependencies = [
 name = "aircard"
 version = "1.2.2"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "base64",
  "eframe",

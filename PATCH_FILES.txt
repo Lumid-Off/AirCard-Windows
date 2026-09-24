@@ -1,0 +1,14 @@
+AirCard Windows Community v9 overlay
+
+Copy/extract these files into the root of an existing Lumid-Off/AirCard-Windows v1.2.2 project (or your v8 working tree) and overwrite matching files.
+
+Build:
+  cargo build --release
+
+Run:
+  .\target\release\aircard.exe
+
+Notes:
+- Cargo.toml adds ab_glyph for native text rendering. Cargo will update Cargo.lock on first build.
+- Public v9 removes GIF/APNG and .pkpass export/inspector UI.
+- Do not copy a stale Cargo.lock from this overlay; none is included.

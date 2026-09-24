@@ -42,12 +42,16 @@ pub fn is_valid_card_hash(h: &str) -> bool {
     }
 
     // Must be base64 alphabet characters
-    if !trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '-' || c == '_' || c == '=') {
+    if !trimmed.chars().all(|c| {
+        c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '-' || c == '_' || c == '='
+    }) {
         return false;
     }
 
     // Reject strings with multiple underscores or hyphens (typical of system asset/bundle names)
-    if trimmed.chars().filter(|&c| c == '_').count() > 1 || trimmed.chars().filter(|&c| c == '-').count() > 2 {
+    if trimmed.chars().filter(|&c| c == '_').count() > 1
+        || trimmed.chars().filter(|&c| c == '-').count() > 2
+    {
         return false;
     }
 
@@ -117,7 +121,11 @@ pub fn is_valid_card_hash(h: &str) -> bool {
                 return false;
             }
 
-            if DUMMY_HASHES.contains(&trimmed) || DUMMY_HASHES.iter().any(|d| d.trim_end_matches('=') == trimmed) {
+            if DUMMY_HASHES.contains(&trimmed)
+                || DUMMY_HASHES
+                    .iter()
+                    .any(|d| d.trim_end_matches('=') == trimmed)
+            {
                 return false;
             }
             return true;
@@ -131,7 +139,10 @@ pub fn load_saved_cards() -> Vec<SavedCard> {
     let path = get_cards_storage_path();
     if let Ok(content) = fs::read_to_string(&path) {
         if let Ok(cards) = serde_json::from_str::<Vec<SavedCard>>(&content) {
-            let valid_cards: Vec<SavedCard> = cards.into_iter().filter(|c| is_valid_card_hash(&c.hash)).collect();
+            let valid_cards: Vec<SavedCard> = cards
+                .into_iter()
+                .filter(|c| is_valid_card_hash(&c.hash))
+                .collect();
             // Automatically purge corrupted or garbage entries from disk
             save_saved_cards(&valid_cards);
             return valid_cards;
@@ -197,8 +208,10 @@ const DUMMY_HASHES: &[&str] = &[
 use std::sync::LazyLock;
 
 static DESC_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(?:description|localizedDescription|passName|title)\s*[:=]\s*['"]([^'"]+)['"]"#)
-        .unwrap()
+    Regex::new(
+        r#"(?i)(?:description|localizedDescription|passName|title)\s*[:=]\s*['"]([^'"]+)['"]"#,
+    )
+    .unwrap()
 });
 
 static CARD_REGEXES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
@@ -232,7 +245,11 @@ pub fn extract_card_hash_from_line(line: &str) -> Option<String> {
     for r in CARD_REGEXES.iter() {
         if let Some(caps) = r.captures(line) {
             if let Some(m) = caps.get(1) {
-                let h = m.as_str().trim().trim_matches(['\'', '"']).trim_end_matches(['.', ',']);
+                let h = m
+                    .as_str()
+                    .trim()
+                    .trim_matches(['\'', '"'])
+                    .trim_end_matches(['.', ',']);
                 if is_valid_card_hash(h) {
                     let mut norm = h.to_string();
                     if norm.len() == 27 {
@@ -268,7 +285,8 @@ where
     ));
     let libs = &session.libs;
     log("Starting com.apple.syslog_relay service on device...".to_string());
-    let service_conn = session.start_service("com.apple.syslog_relay")
+    let service_conn = session
+        .start_service("com.apple.syslog_relay")
         .context("Failed to start com.apple.syslog_relay service")?;
 
     let raw_socket = unsafe { (libs.amd_service_connection_get_socket)(service_conn) };
@@ -298,11 +316,7 @@ where
 
     while !stop_flag.load(Ordering::Relaxed) {
         let bytes_read = unsafe {
-            (libs.amd_service_connection_receive)(
-                service_conn,
-                buffer.as_mut_ptr(),
-                buffer.len(),
-            )
+            (libs.amd_service_connection_receive)(service_conn, buffer.as_mut_ptr(), buffer.len())
         };
 
         if bytes_read > 0 {
@@ -403,7 +417,11 @@ mod tests {
         ];
 
         for g in garbage {
-            assert!(!is_valid_card_hash(g), "Expected {} to be rejected as card hash", g);
+            assert!(
+                !is_valid_card_hash(g),
+                "Expected {} to be rejected as card hash",
+                g
+            );
         }
     }
 
@@ -411,7 +429,11 @@ mod tests {
     fn test_saved_cards_purging() {
         let loaded = load_saved_cards();
         for card in &loaded {
-            assert!(is_valid_card_hash(&card.hash), "Invalid hash was not purged: {}", card.hash);
+            assert!(
+                is_valid_card_hash(&card.hash),
+                "Invalid hash was not purged: {}",
+                card.hash
+            );
         }
     }
 
@@ -425,7 +447,9 @@ mod tests {
             }
         };
         let libs = &session.libs;
-        let conn = session.start_service("com.apple.syslog_relay").expect("start syslog_relay");
+        let conn = session
+            .start_service("com.apple.syslog_relay")
+            .expect("start syslog_relay");
         let raw_socket = unsafe { (libs.amd_service_connection_get_socket)(conn) };
         unsafe {
             let timeout_ms: u32 = 500;
@@ -440,7 +464,11 @@ mod tests {
         let mut buf = [0u8; 4096];
         let start = std::time::Instant::now();
         let n = unsafe { (libs.amd_service_connection_receive)(conn, buf.as_mut_ptr(), buf.len()) };
-        println!("AMDServiceConnectionReceive returned: {} in {:?}", n, start.elapsed());
+        println!(
+            "AMDServiceConnectionReceive returned: {} in {:?}",
+            n,
+            start.elapsed()
+        );
         unsafe { (libs.amd_service_connection_invalidate)(conn) };
     }
 }
