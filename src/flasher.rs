@@ -11,6 +11,7 @@ use crate::airlift::{
 };
 use crate::airtraffic::sync_assets_via_airtraffic;
 use crate::device::{ActiveDeviceSession, ConnectionMode};
+use crate::wallet_backup::{capture_original_card, load_original_assets};
 
 #[allow(dead_code)]
 pub const TARGET_WALLET_ASSETS: &[&str] = &[
@@ -218,10 +219,21 @@ where
     F: FnMut(usize, usize, &str),
     L: FnMut(&str),
 {
-    let pkpass_dir = format!("/var/mobile/Library/Passes/Cards/{}.pkpass", card_hash);
+    anyhow::ensure!(
+        crate::scanner::is_valid_card_hash(card_hash),
+        "Invalid Wallet card path identifier"
+    );
 
     log(&format!("Target Card Hash: {}", card_hash));
-    log(&format!("Skin payload size: {} bytes PNG, {} bytes PDF", skin_png.len(), skin_pdf.len()));
+    log(&format!(
+        "Skin payload size: {} bytes PNG, {} bytes PDF",
+        skin_png.len(),
+        skin_pdf.len()
+    ));
+    let resolved_hash = capture_original_card(udid, connection_mode, card_hash, &mut log)
+        .context("Failed to inspect the original Wallet card face")?
+        .unwrap_or_else(|| card_hash.to_string());
+    let pkpass_dir = format!("/var/mobile/Library/Passes/Cards/{}.pkpass", resolved_hash);
 
     let total_steps = 3;
     progress(1, total_steps, "Writing card artwork assets (@3x, @2x, .pdf)...");
@@ -247,6 +259,92 @@ where
         }
     }
 
+    invalidate_wallet_caches(
+        udid,
+        connection_mode,
+        resolved_hash.as_str(),
+        &mut progress,
+        &mut log,
+    );
+
+    progress(total_steps, total_steps, "Card skin updated successfully!");
+    log("Card skin write finished! Close and reopen Wallet on iPhone to view.");
+    Ok(())
+}
+
+pub fn restore_wallet_original<F, L>(
+    udid: &str,
+    connection_mode: ConnectionMode,
+    card_hash: &str,
+    mut progress: F,
+    mut log: L,
+) -> Result<()>
+where
+    F: FnMut(usize, usize, &str),
+    L: FnMut(&str),
+{
+    let original_assets = load_original_assets(udid, card_hash)
+        .context("Could not load the original Wallet card face backup")?;
+    let asset_refs: Vec<(&str, &[u8])> = original_assets
+        .iter()
+        .map(|(asset, data)| (asset.as_str(), data.as_slice()))
+        .collect();
+
+    log(&format!(
+        "Restoring {} original card artwork asset(s) for hash {}...",
+        asset_refs.len(),
+        card_hash
+    ));
+    progress(1, 3, "Restoring original card artwork...");
+
+    let pkpass_dir = format!("/var/mobile/Library/Passes/Cards/{}.pkpass", card_hash);
+    if let Err(err) = write_system_files_batch(
+        udid,
+        connection_mode,
+        &pkpass_dir,
+        &asset_refs,
+        &mut log,
+    ) {
+        log(&format!(
+            "Notice: Restore batch write failed ({}), trying individual asset writes...",
+            err
+        ));
+        for (asset, data) in &original_assets {
+            write_system_file(
+                udid,
+                connection_mode,
+                &pkpass_dir,
+                asset,
+                data,
+                &mut log,
+            )
+            .context(format!("Failed to restore original card asset {}", asset))?;
+        }
+    }
+
+    invalidate_wallet_caches(
+        udid,
+        connection_mode,
+        card_hash,
+        &mut progress,
+        &mut log,
+    );
+
+    progress(3, 3, "Original card face restored successfully!");
+    log("Original card face restored. Close and reopen Wallet on iPhone to view it.");
+    Ok(())
+}
+
+fn invalidate_wallet_caches<F, L>(
+    udid: &str,
+    connection_mode: ConnectionMode,
+    card_hash: &str,
+    progress: &mut F,
+    log: &mut L,
+) where
+    F: FnMut(usize, usize, &str),
+    L: FnMut(&str),
+{
     let cache_leaves: [(&str, &[u8]); 3] = [
         ("FrontFace", b"corrupted"),
         ("PlaceHolder", b"corrupted"),
@@ -256,15 +354,18 @@ where
     for (c_idx, ext) in [".cache", ".pkcache"].iter().enumerate() {
         let step = 2 + c_idx;
         let cache_dir = format!("/var/mobile/Library/Passes/Cards/{}{}", card_hash, ext);
-        progress(step, total_steps, &format!("Clearing {} cache...", ext));
-        log(&format!("[{}/{}] Invalidating cache leaves in {}...", step, total_steps, cache_dir));
+        progress(step, 3, &format!("Clearing {} cache...", ext));
+        log(&format!(
+            "[{}/3] Invalidating cache leaves in {}...",
+            step, cache_dir
+        ));
 
         if write_system_files_batch(
             udid,
             connection_mode,
             &cache_dir,
             &cache_leaves,
-            &mut log,
+            &mut *log,
         )
         .is_err()
         {
@@ -275,15 +376,11 @@ where
                     &cache_dir,
                     leaf,
                     data,
-                    &mut log,
+                    &mut *log,
                 );
             }
         }
     }
-
-    progress(total_steps, total_steps, "Card skin updated successfully!");
-    log("Card skin write finished! Close and reopen Wallet on iPhone to view.");
-    Ok(())
 }
 
 pub fn flash_passcode_theme<F, L>(
