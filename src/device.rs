@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
+#[cfg(windows)]
 use std::net::{SocketAddr, TcpStream};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 use std::ptr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -115,12 +118,23 @@ pub struct UsbmuxDeviceEntry {
 }
 
 pub fn query_usbmux_devices() -> Result<Vec<UsbmuxDeviceEntry>> {
+    #[cfg(windows)]
     let addr: SocketAddr = "127.0.0.1:27015".parse().unwrap();
+    #[cfg(windows)]
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))
         .context("Could not connect to Apple Mobile Device Service (usbmuxd) at 127.0.0.1:27015. Please ensure iTunes or Apple Mobile Device Support is installed and the service is running.")?;
 
+    #[cfg(unix)]
+    let mut stream = UnixStream::connect("/var/run/usbmuxd")
+        .context("Could not connect to usbmuxd at /var/run/usbmuxd. Connect and trust your iPhone; on Linux, ensure usbmuxd is running.")?;
+
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+
+    query_usbmux_stream(&mut stream)
+}
+
+fn query_usbmux_stream(stream: &mut (impl Read + Write)) -> Result<Vec<UsbmuxDeviceEntry>> {
 
     let mut req_dict = HashMap::new();
     req_dict.insert("MessageType".to_string(), plist::Value::String("ListDevices".to_string()));
@@ -151,8 +165,14 @@ pub fn query_usbmux_devices() -> Result<Vec<UsbmuxDeviceEntry>> {
     stream.read_exact(&mut resp_header)?;
 
     let resp_len = u32::from_le_bytes([resp_header[0], resp_header[1], resp_header[2], resp_header[3]]) as usize;
-    if resp_len < 16 {
+    if !(16..=16 * 1024 * 1024).contains(&resp_len) {
         bail!("Invalid usbmux response length: {}", resp_len);
+    }
+    if resp_header[4..8] != 1u32.to_le_bytes()
+        || resp_header[8..12] != 8u32.to_le_bytes()
+        || resp_header[12..16] != tag.to_le_bytes()
+    {
+        bail!("Invalid usbmux response version, message type, or tag");
     }
 
     let mut payload = vec![0u8; resp_len - 16];
@@ -470,6 +490,25 @@ impl ActiveDeviceSession {
 mod tests {
     use super::*;
 
+    struct MockMux {
+        response: std::io::Cursor<Vec<u8>>,
+        request: Vec<u8>,
+    }
+
+    impl Read for MockMux {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.response.read(buf)
+        }
+    }
+
+    impl Write for MockMux {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.request.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+
     fn entry(udid: &str, transport: DeviceTransport) -> UsbmuxDeviceEntry {
         UsbmuxDeviceEntry {
             udid: udid.to_string(),
@@ -528,6 +567,43 @@ mod tests {
     }
 
     #[test]
+    fn usbmux_request_and_device_response() {
+        let mut properties = plist::Dictionary::new();
+        properties.insert("SerialNumber".into(), "test-udid".into());
+        properties.insert("ConnectionType".into(), "USB".into());
+        let mut device = plist::Dictionary::new();
+        device.insert("Properties".into(), plist::Value::Dictionary(properties.clone()));
+        let mut root = plist::Dictionary::new();
+        root.insert("DeviceList".into(), plist::Value::Array(vec![plist::Value::Dictionary(device)]));
+        let mut payload = Vec::new();
+        plist::Value::Dictionary(root).to_writer_xml(&mut payload).unwrap();
+        let mut response = Vec::new();
+        for field in [payload.len() as u32 + 16, 1, 8, 1] {
+            response.extend_from_slice(&field.to_le_bytes());
+        }
+        response.extend(payload);
+        let mut mock = MockMux { response: std::io::Cursor::new(response), request: Vec::new() };
+        let devices = query_usbmux_stream(&mut mock).unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].udid, "test-udid");
+        assert_eq!(devices[0].transport, DeviceTransport::Usb);
+        assert_eq!(plist::Value::from_reader(std::io::Cursor::new(&devices[0].properties_plist)).unwrap(), plist::Value::Dictionary(properties));
+        assert_eq!(u32::from_le_bytes(mock.request[..4].try_into().unwrap()) as usize, mock.request.len());
+        let request = plist::Value::from_reader(std::io::Cursor::new(&mock.request[16..])).unwrap();
+        assert_eq!(request.as_dictionary().unwrap()["MessageType"].as_string(), Some("ListDevices"));
+    }
+
+    #[test]
+    fn usbmux_rejects_invalid_headers_and_truncated_payload() {
+        for fields in [[15u32, 1, 8, 1], [u32::MAX, 1, 8, 1], [16, 0, 8, 1], [16, 1, 7, 1], [16, 1, 8, 2], [32, 1, 8, 1]] {
+            let bytes: Vec<u8> = fields.into_iter().flat_map(u32::to_le_bytes).collect();
+            let mut mock = MockMux { response: std::io::Cursor::new(bytes), request: Vec::new() };
+            assert!(query_usbmux_stream(&mut mock).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a running usbmuxd service"]
     fn test_usbmux_query() {
         match query_usbmux_devices() {
             Ok(devs) => {
@@ -543,6 +619,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires Apple frameworks and a connected iPhone"]
     fn test_list_connected_devices() {
         match list_connected_devices() {
             Ok(devs) => {

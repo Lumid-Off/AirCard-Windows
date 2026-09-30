@@ -7,32 +7,7 @@ use anyhow::{Context, Result, bail};
 use crate::apple::{ATHostConnectionRef, get_apple_libraries};
 use crate::device::{DeviceTransport, ensure_transport_available};
 
-#[link(name = "bcrypt")]
-unsafe extern "system" {
-    fn BCryptGenRandom(
-        hAlgorithm: *mut std::ffi::c_void,
-        pbBuffer: *mut u8,
-        cbBuffer: u32,
-        dwFlags: u32,
-    ) -> i32;
-}
-
-fn generate_uuid_v4() -> String {
-    let mut bytes = [0u8; 16];
-    unsafe {
-        let _ = BCryptGenRandom(std::ptr::null_mut(), bytes.as_mut_ptr(), bytes.len() as u32, 2);
-    }
-    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
-    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5],
-        bytes[6], bytes[7],
-        bytes[8], bytes[9],
-        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
-    )
-}
+use crate::platform::generate_uuid_v4;
 
 pub enum SyncEvent {
     Log(String),
@@ -77,14 +52,14 @@ where
     loop {
         let elapsed = start.elapsed();
         if elapsed >= Duration::from_secs(total_timeout_secs) {
-            bail!("AirTraffic sync timed out ({}s). 1) Unlock iPhone screen and keep it on. 2) Open Apple Books app on iPhone once. 3) Close iTunes on PC.", total_timeout_secs);
+            bail!("AirTraffic sync timed out ({}s). 1) Unlock iPhone screen and keep it on. 2) Open Apple Books app on iPhone once. 3) Close other device sync apps on your computer.", total_timeout_secs);
         }
         let timeout = Duration::from_secs(total_timeout_secs) - elapsed;
         match rx.recv_timeout(timeout) {
             Ok(SyncEvent::Log(msg)) => log(&msg),
             Ok(SyncEvent::Done(res)) => return res,
             Err(_) => {
-                bail!("AirTraffic sync timed out ({}s). 1) Unlock iPhone screen and keep it on. 2) Open Apple Books app on iPhone once. 3) Close iTunes on PC.", total_timeout_secs);
+                bail!("AirTraffic sync timed out ({}s). 1) Unlock iPhone screen and keep it on. 2) Open Apple Books app on iPhone once. 3) Close other device sync apps on your computer.", total_timeout_secs);
             }
         }
     }
@@ -143,9 +118,9 @@ where
         let mut host_info_dict = HashMap::new();
         host_info_dict.insert("Type".to_string(), plist::Value::String("iTunes".to_string()));
         host_info_dict.insert("Version".to_string(), plist::Value::String("13.7.0.161".to_string()));
-        host_info_dict.insert("MacOSVersion".to_string(), plist::Value::String("Windows NT 10.0".to_string()));
+        host_info_dict.insert("MacOSVersion".to_string(), plist::Value::String(std::env::consts::OS.to_string()));
         host_info_dict.insert("SyncHostName".to_string(), plist::Value::String("airlift".to_string()));
-        host_info_dict.insert("LibraryID".to_string(), plist::Value::String(generate_uuid_v4()));
+        host_info_dict.insert("LibraryID".to_string(), plist::Value::String(generate_uuid_v4()?));
         host_info_dict.insert("SyncedDataclasses".to_string(), plist::Value::Array(vec![plist::Value::String("Book".to_string())]));
         host_info_dict.insert("SyncedAssetTypes".to_string(), plist::Value::Array(vec![plist::Value::String("Book".to_string())]));
         host_info_dict.insert("Wakeable".to_string(), plist::Value::Boolean(false));

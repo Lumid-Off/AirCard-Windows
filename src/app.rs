@@ -57,9 +57,20 @@ fn current_timestamp() -> String {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 fn current_timestamp() -> String {
-    "00:00:00.000".to_string()
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let seconds = now.as_secs() as libc::time_t;
+    let mut local = std::mem::MaybeUninit::<libc::tm>::uninit();
+    unsafe {
+        if !libc::localtime_r(&seconds, local.as_mut_ptr()).is_null() {
+            let local = local.assume_init();
+            return format!("{:02}:{:02}:{:02}.{:03}", local.tm_hour, local.tm_min, local.tm_sec, now.subsec_millis());
+        }
+    }
+    format!("{}.{:03}", now.as_secs(), now.subsec_millis())
 }
 
 pub struct AirCardApp {
@@ -111,7 +122,7 @@ impl AirCardApp {
 
         let (apple_ready, apple_status) = match apple::verify_support() {
             Ok(msg) => (true, msg),
-            Err(err) => (false, err.to_string()),
+            Err(err) => (false, format!("{err:#}")),
         };
 
         let language = Language::load();
@@ -155,12 +166,14 @@ impl AirCardApp {
             show_logs_window: false,
         };
 
-        app.add_log("AirCard Windows v1.2.1 initialized");
-        app.add_log(format!("Apple Support Runtime: {}", if app.apple_ready { "Loaded and operational" } else { "Not found (iTunes required)" }));
+        app.add_log(format!("{} initialized on {}", crate::platform::APP_TITLE, std::env::consts::OS));
+        app.add_log(app.apple_status.clone());
         app.add_log(format!("Loaded {} saved card(s) from database", app.saved_cards.len()));
 
         if app.apple_ready {
             app.refresh_devices();
+        } else {
+            app.status_msg = "Device features unavailable. See Help for platform requirements.".to_string();
         }
 
         app
@@ -175,6 +188,21 @@ impl AirCardApp {
     }
 
     fn refresh_devices(&mut self) {
+        match apple::verify_support() {
+            Ok(status) => {
+                self.apple_ready = true;
+                self.apple_status = status;
+            }
+            Err(err) => {
+                self.apple_ready = false;
+                self.apple_status = format!("{err:#}");
+                self.devices.clear();
+                self.selected_udid = None;
+                self.status_msg = "Device features unavailable. See Help for platform requirements.".to_string();
+                self.add_log(self.apple_status.clone());
+                return;
+            }
+        }
         self.add_log("Scanning for connected iOS devices via usbmuxd...");
         match list_connected_devices() {
             Ok(devs) => {
@@ -1023,7 +1051,7 @@ impl eframe::App for AirCardApp {
                             .color(md3::ON_SURFACE),
                     );
                     ui.label(
-                        egui::RichText::new("v1.2.2")
+                        egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
                             .size(11.0)
                             .color(md3::ON_SURFACE_VARIANT),
                     );
@@ -1325,7 +1353,8 @@ impl AirCardApp {
                     let scan_fg = if self.scanning_syslog { md3::ERROR } else { md3::ON_PRIMARY_CONTAINER };
                     let scan_btn = egui::Button::new(egui::RichText::new(scan_label).size(12.0).color(scan_fg))
                         .fill(scan_bg).corner_radius(20).stroke(egui::Stroke::NONE);
-                    if ui.add(scan_btn).clicked() { self.toggle_syslog_scan(); }
+                    if ui.add_enabled(self.apple_ready && !self.is_busy, scan_btn)
+                        .on_disabled_hover_text(&self.apple_status).clicked() { self.toggle_syslog_scan(); }
                 });
 
                 if !self.saved_cards.is_empty() {
@@ -1382,7 +1411,8 @@ impl AirCardApp {
                 ui.label(egui::RichText::new(language.text("Write to iPhone")).strong().size(12.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
 
-                let can_flash = !self.is_busy
+                let can_flash = self.apple_ready
+                    && !self.is_busy
                     && self.selected_transport_available()
                     && !self.card_hash.trim().is_empty()
                     && self.skin.is_some();
@@ -1625,7 +1655,8 @@ impl AirCardApp {
                 ui.label(egui::RichText::new(language.text("Write to iPhone")).strong().size(12.0).color(md3::ON_SURFACE));
                 ui.add_space(4.0);
 
-                let can_flash = !self.is_busy
+                let can_flash = self.apple_ready
+                    && !self.is_busy
                     && self.selected_transport_available()
                     && self.loaded_theme.is_some();
                 let flash_btn = egui::Button::new(
@@ -1755,7 +1786,8 @@ impl AirCardApp {
 
                 ui.label(egui::RichText::new(language.text("Prerequisites")).strong().size(12.0).color(md3::ON_SURFACE));
                 ui.add_space(6.0);
-                ui.label(egui::RichText::new(language.text("- 64-bit iTunes or Apple Mobile Device Support installed")).size(11.5).color(md3::ON_SURFACE_VARIANT));
+                ui.label(egui::RichText::new(language.text(crate::platform::device_setup_help())).size(11.5).color(md3::ON_SURFACE_VARIANT));
+                ui.label(egui::RichText::new(&self.apple_status).size(11.5).color(md3::ON_SURFACE_VARIANT));
                 ui.label(egui::RichText::new(language.text("- First-time setup: connect by USB and tap \"Trust this Computer\"")).size(11.5).color(md3::ON_SURFACE_VARIANT));
                 ui.label(egui::RichText::new(language.text("- WiFi: enable WiFi sync, then use the same local network")).size(11.5).color(md3::ON_SURFACE_VARIANT));
                 ui.label(egui::RichText::new(language.text("- Select Auto, USB only, or WiFi only in the top bar")).size(11.5).color(md3::ON_SURFACE_VARIANT));

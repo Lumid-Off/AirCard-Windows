@@ -1,4 +1,5 @@
 use std::ffi::{CStr, CString};
+#[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::ptr;
@@ -7,10 +8,13 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{Context, Result, bail};
 use libloading::{Library, Symbol};
 
+#[cfg(windows)]
+#[link(name = "kernel32")]
 unsafe extern "system" {
     fn SetDllDirectoryW(lpPathName: *const u16) -> i32;
 }
 
+#[cfg(windows)]
 const APPLE_SUPPORT_DIRS: &[&str] = &[
     r"C:\Program Files\Common Files\Apple\Mobile Device Support",
     r"C:\Program Files (x86)\Common Files\Apple\Mobile Device Support",
@@ -138,6 +142,7 @@ pub struct AppleLibraries {
 
 static LIBRARIES: OnceLock<Arc<AppleLibraries>> = OnceLock::new();
 
+#[cfg(windows)]
 pub fn locate_support_dir() -> Option<PathBuf> {
     APPLE_SUPPORT_DIRS
         .iter()
@@ -149,11 +154,8 @@ pub fn locate_support_dir() -> Option<PathBuf> {
         })
 }
 
-pub fn get_apple_libraries() -> Result<Arc<AppleLibraries>> {
-    if let Some(libs) = LIBRARIES.get() {
-        return Ok(Arc::clone(libs));
-    }
-
+#[cfg(windows)]
+fn library_paths() -> Result<[PathBuf; 3]> {
     let dir = locate_support_dir().context(
         "Apple Mobile Device Support was not found. Install 64-bit iTunes package from Apple.",
     )?;
@@ -161,17 +163,39 @@ pub fn get_apple_libraries() -> Result<Arc<AppleLibraries>> {
     // Configure Windows DLL search directory so dependent DLLs (e.g. objc, pthread, SQLite) are resolved
     let wide_dir: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
     unsafe {
-        SetDllDirectoryW(wide_dir.as_ptr());
+        if SetDllDirectoryW(wide_dir.as_ptr()) == 0 {
+            return Err(std::io::Error::last_os_error()).context("Failed to configure Apple DLL search directory");
+        }
     }
 
-    let cf_path = dir.join("CoreFoundation.dll");
-    let md_path = dir.join("MobileDevice.dll");
-    let ath_path = dir.join("AirTrafficHost.dll");
+    Ok([dir.join("CoreFoundation.dll"), dir.join("MobileDevice.dll"), dir.join("AirTrafficHost.dll")])
+}
+
+#[cfg(target_os = "macos")]
+fn library_paths() -> Result<[PathBuf; 3]> {
+    // Load directly: system frameworks may live only in the dyld shared cache.
+    Ok([
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation".into(),
+        "/System/Library/PrivateFrameworks/MobileDevice.framework/MobileDevice".into(),
+        "/System/Library/PrivateFrameworks/AirTrafficHost.framework/AirTrafficHost".into(),
+    ])
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn library_paths() -> Result<[PathBuf; 3]> {
+    bail!("{}", crate::platform::device_setup_help())
+}
+
+pub fn get_apple_libraries() -> Result<Arc<AppleLibraries>> {
+    if let Some(libs) = LIBRARIES.get() {
+        return Ok(Arc::clone(libs));
+    }
+    let [cf_path, md_path, ath_path] = library_paths()?;
 
     unsafe {
-        let cf_lib = Library::new(&cf_path).context("Failed to load CoreFoundation.dll")?;
-        let md_lib = Library::new(&md_path).context("Failed to load MobileDevice.dll")?;
-        let ath_lib = Library::new(&ath_path).context("Failed to load AirTrafficHost.dll")?;
+        let cf_lib = Library::new(&cf_path).with_context(|| format!("Failed to load {}", cf_path.display()))?;
+        let md_lib = Library::new(&md_path).with_context(|| format!("Failed to load {}", md_path.display()))?;
+        let ath_lib = Library::new(&ath_path).with_context(|| format!("Failed to load {}", ath_path.display()))?;
 
         macro_rules! load_sym {
             ($lib:expr, $name:expr) => {{
@@ -442,6 +466,34 @@ impl AppleLibraries {
 
 pub fn verify_support() -> Result<String> {
     let _libs = get_apple_libraries()?;
-    let dir = locate_support_dir().unwrap_or_default();
-    Ok(format!("Apple Mobile Device Support ready: {}", dir.display()))
+    Ok(format!("Apple device runtime ready on {}", std::env::consts::OS))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    #[test]
+    fn device_runtime_reports_desktop_only_support() {
+        let error = super::verify_support().unwrap_err().to_string();
+        assert!(error.contains("Linux supports image and theme previews"));
+        assert!(error.contains("AirTraffic"));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires installed Apple frameworks; run explicitly on macOS"]
+    fn native_frameworks_and_plist_round_trip() {
+        let libs = get_apple_libraries().unwrap();
+        let string = libs.create_cf_string("AirCard 🎴").unwrap();
+        assert_eq!(libs.to_rust_string(string.raw), "AirCard 🎴");
+        let value = plist::Value::String("native framework test".into());
+        let mut bytes = Vec::new();
+        value.to_writer_binary(&mut bytes).unwrap();
+        let native = libs.create_cf_plist_from_bytes(&bytes).unwrap();
+        let result = libs.cf_plist_to_bytes(native.raw).unwrap();
+        assert_eq!(plist::Value::from_reader(std::io::Cursor::new(result)).unwrap(), value);
+    }
 }
