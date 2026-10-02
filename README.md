@@ -18,6 +18,17 @@
 
 ---
 
+## Community Resources
+
+- [AirCards](https://aircards.org/) — An independent community for discovering
+  and sharing Apple Wallet card artwork. Browse designs, download artwork
+  for use with AirCard-Windows, or share your own creations.
+
+AirCards is maintained independently and is not affiliated with the
+AirCard-Windows project.
+
+---
+
 ## Requirements
 - **Windows 10 / 11 (64-bit)**
 - **Apple Mobile Device Support / 64-bit iTunes** (required for Apple device communication).
