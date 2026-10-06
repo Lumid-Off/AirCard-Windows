@@ -9,8 +9,8 @@ use image::DynamicImage;
 
 use crate::apple;
 use crate::device::{ConnectionMode, DeviceInfo, DeviceTransport, list_connected_devices};
-use crate::flasher::{flash_passcode_theme, flash_wallet_skin, restore_wallet_original};
-use crate::image_skin::{PreparedSkin, crop_uv_for_card};
+use crate::flasher::{flash_passcode_theme, flash_wallet_skin, read_wallet_artwork, restore_wallet_original};
+use crate::image_skin::{PreparedSkin, card_artwork_to_png, crop_uv_for_card};
 use crate::i18n::Language;
 use crate::passthm::{PasscodeTheme, parse_passthm_file};
 use crate::scanner::{SavedCard, load_saved_cards, scan_syslog_for_cards};
@@ -27,6 +27,7 @@ enum BackgroundTaskMessage {
     Progress { step: usize, total: usize, message: String },
     Log(String),
     CardFound { hash: String, name: String },
+    CardArtworkLoaded { hash: String, source_name: String, png: Vec<u8>, saved_to: Option<PathBuf> },
     Done(Result<String, String>),
 }
 
@@ -82,6 +83,10 @@ pub struct AirCardApp {
     crop_focus: [f32; 2],
     crop_dirty: bool,
     skin: Option<PreparedSkin>,
+    current_card_texture: Option<egui::TextureHandle>,
+    current_card_png: Option<Vec<u8>>,
+    current_card_hash: Option<String>,
+    current_card_backup_path: Option<PathBuf>,
     scanning_syslog: bool,
     scan_stop_flag: Option<Arc<AtomicBool>>,
 
@@ -133,6 +138,10 @@ impl AirCardApp {
             crop_focus: [0.5, 0.5],
             crop_dirty: false,
             skin: None,
+            current_card_texture: None,
+            current_card_png: None,
+            current_card_hash: None,
+            current_card_backup_path: None,
             scanning_syslog: false,
             scan_stop_flag: None,
 
@@ -386,6 +395,158 @@ impl AirCardApp {
                 self.status_msg = format!("Could not save PNG: {err}");
             }
         }
+    }
+
+    fn save_current_card_png(&mut self) {
+        let hash = self.card_hash.trim().to_string();
+        if hash.is_empty() {
+            self.add_log("Current artwork save failed: Target card hash is empty.");
+            self.status_msg = self
+                .language
+                .text("Please enter or scan a target card hash.")
+                .to_string();
+            return;
+        }
+
+        let Some(destination) = rfd::FileDialog::new()
+            .set_title(self.language.text("Save Current Card Artwork"))
+            .set_file_name("current-card-artwork.png")
+            .add_filter("PNG image", &["png"])
+            .save_file()
+        else {
+            return;
+        };
+        let destination = if destination
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+        {
+            destination
+        } else {
+            destination.with_extension("png")
+        };
+
+        if self.current_card_hash.as_deref() == Some(hash.as_str()) {
+            if let Some(png) = self.current_card_png.as_ref() {
+                match std::fs::write(&destination, png) {
+                    Ok(()) => {
+                        self.current_card_backup_path = Some(destination.clone());
+                        self.add_log(format!(
+                            "Saved current card PNG to {}",
+                            destination.display()
+                        ));
+                        self.status_msg =
+                            format!("Current card PNG saved to {}", destination.display());
+                    }
+                    Err(error) => {
+                        self.add_log(format!("Could not save current card PNG: {error}"));
+                        self.status_msg = format!("Error: Could not save PNG: {error}");
+                    }
+                }
+                return;
+            }
+        }
+
+        self.load_current_card_artwork(Some(destination));
+    }
+
+    fn load_current_card_artwork(&mut self, save_to: Option<PathBuf>) {
+        if !self.validate_selected_transport("Current card artwork read") {
+            return;
+        }
+        let Some(udid) = self.selected_udid.clone() else {
+            return;
+        };
+        let hash = self.card_hash.trim().to_string();
+        if hash.is_empty() {
+            self.add_log("Artwork read failed: Target card hash is empty.");
+            self.status_msg = self
+                .language
+                .text("Please enter or scan a target card hash.")
+                .to_string();
+            return;
+        }
+
+        if let Some(ref flag) = self.scan_stop_flag {
+            flag.store(true, Ordering::Relaxed);
+        }
+        self.scanning_syslog = false;
+        self.is_busy = true;
+        self.progress_step = 0;
+        self.progress_total = 1;
+        self.progress_msg = self
+            .language
+            .text("Reading current card artwork from iPhone...")
+            .to_string();
+        self.status_msg = if save_to.is_some() {
+            self.language
+                .text("Reading and saving the current card artwork...")
+                .to_string()
+        } else {
+            self.language
+                .text("Loading the current card artwork into Wallet Preview...")
+                .to_string()
+        };
+        let connection_mode = self.connection_mode;
+        self.add_log(format!(
+            "Starting read-only card artwork load for hash {}",
+            hash
+        ));
+
+        let (tx, rx) = channel();
+        self.task_rx = Some(rx);
+        thread::spawn(move || {
+            let tx_log = tx.clone();
+            let result = read_wallet_artwork(&udid, connection_mode, &hash, move |message| {
+                let _ = tx_log.send(BackgroundTaskMessage::Log(message.to_string()));
+            });
+            match result {
+                Ok((source_name, artwork)) => {
+                    let png = match card_artwork_to_png(&source_name, &artwork) {
+                        Ok(png) => png,
+                        Err(error) => {
+                            let _ = tx.send(BackgroundTaskMessage::Done(Err(format!(
+                                "Could not prepare current card artwork for preview: {error:#}"
+                            ))));
+                            return;
+                        }
+                    };
+                    if let Some(path) = save_to.as_ref() {
+                        if let Err(error) = std::fs::write(path, &png) {
+                            let _ = tx.send(BackgroundTaskMessage::Done(Err(format!(
+                                "Could not save current card PNG to {}: {}",
+                                path.display(),
+                                error
+                            ))));
+                            return;
+                        }
+                    }
+                    let _ = tx.send(BackgroundTaskMessage::CardArtworkLoaded {
+                        hash,
+                        source_name,
+                        png,
+                        saved_to: save_to,
+                    });
+                }
+                Err(error) => {
+                    let _ = tx.send(BackgroundTaskMessage::Done(Err(format!("{error:#}"))));
+                }
+            }
+        });
+    }
+
+    fn reset_to_current_card(&mut self) {
+        self.source_path = None;
+        self.source_image = None;
+        self.source_texture = None;
+        self.crop_focus = [0.5, 0.5];
+        self.crop_dirty = false;
+        self.skin = None;
+        self.status_msg = self
+            .language
+            .text("Wallet Preview reset to the current card artwork.")
+            .to_string();
+        self.add_log(self.status_msg.clone());
     }
 
     fn toggle_syslog_scan(&mut self) {
@@ -758,7 +919,7 @@ impl AirCardApp {
         });
     }
 
-    fn handle_messages(&mut self) {
+    fn handle_messages(&mut self, ctx: &egui::Context) {
         let mut messages = Vec::new();
         if let Some(ref rx) = self.task_rx {
             while let Ok(msg) = rx.try_recv() {
@@ -767,6 +928,7 @@ impl AirCardApp {
         }
 
         let mut finished = false;
+        let mut load_after_scan = false;
         for msg in messages {
             match msg {
                 BackgroundTaskMessage::Progress { step, total, message } => {
@@ -784,14 +946,67 @@ impl AirCardApp {
                 BackgroundTaskMessage::CardFound { hash, name } => {
                     self.card_hash = hash.clone();
                     self.saved_cards = load_saved_cards();
+                    if let Some(flag) = self.scan_stop_flag.take() {
+                        flag.store(true, Ordering::Relaxed);
+                    }
+                    self.scanning_syslog = false;
+                    self.source_path = None;
+                    self.source_image = None;
+                    self.source_texture = None;
+                    self.crop_focus = [0.5, 0.5];
+                    self.crop_dirty = false;
+                    self.skin = None;
+                    self.current_card_texture = None;
+                    self.current_card_png = None;
+                    self.current_card_hash = None;
+                    self.current_card_backup_path = None;
                     let msg_str = format!(
-                        "{}: {} ({})",
+                        "{}: {} ({}). {}",
                         self.language.text("Card captured"),
                         name,
-                        hash
+                        hash,
+                        self.language.text("Loading current artwork...")
                     );
                     self.add_log(&msg_str);
                     self.status_msg = msg_str;
+                    finished = true;
+                    load_after_scan = true;
+                }
+                BackgroundTaskMessage::CardArtworkLoaded { hash, source_name, png, saved_to } => {
+                    self.is_busy = false;
+                    self.scanning_syslog = false;
+                    finished = true;
+                    match image::load_from_memory(&png) {
+                        Ok(image) => {
+                            let rgba = image.to_rgba8();
+                            let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                                [rgba.width() as usize, rgba.height() as usize],
+                                rgba.as_raw(),
+                            );
+                            self.current_card_texture = Some(ctx.load_texture(
+                                "current-card-artwork",
+                                color_image,
+                                egui::TextureOptions::LINEAR,
+                            ));
+                            self.current_card_png = Some(png);
+                            self.current_card_hash = Some(hash);
+                            self.current_card_backup_path = saved_to.clone();
+                            let message = if let Some(path) = saved_to {
+                                format!("Current card PNG saved to {} and loaded into Wallet Preview.", path.display())
+                            } else {
+                                format!("Current card artwork ({}) loaded into Wallet Preview.", source_name)
+                            };
+                            self.add_log(format!("Operation completed: {}", message));
+                            self.status_msg = message;
+                        }
+                        Err(error) => {
+                            self.current_card_texture = None;
+                            self.current_card_png = None;
+                            self.current_card_hash = None;
+                            self.add_log(format!("Current card PNG decoding failed: {error}"));
+                            self.status_msg = format!("Error: Current card PNG could not be decoded: {error}");
+                        }
+                    }
                 }
                 BackgroundTaskMessage::Done(res) => {
                     self.is_busy = false;
@@ -816,6 +1031,9 @@ impl AirCardApp {
         }
         if finished {
             self.task_rx = None;
+        }
+        if load_after_scan {
+            self.load_current_card_artwork(None);
         }
     }
 }
@@ -1012,7 +1230,7 @@ fn m3_tab(ui: &mut egui::Ui, current: &mut AppTab, target: AppTab, label: &str) 
 
 impl eframe::App for AirCardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.handle_messages();
+        self.handle_messages(ctx);
         let language = self.language;
 
         if self.is_busy || self.scanning_syslog {
@@ -1324,7 +1542,15 @@ impl AirCardApp {
                 ui.horizontal(|ui| {
                     let btn_w = 90.0;
                     let text_w = (ui.available_width() - btn_w - 12.0).max(150.0);
-                    ui.add(egui::TextEdit::singleline(&mut self.card_hash).hint_text(language.text("Base64 pass hash...")).desired_width(text_w));
+                    let hash_response = ui.add(egui::TextEdit::singleline(&mut self.card_hash).hint_text(language.text("Base64 pass hash...")).desired_width(text_w));
+                    if hash_response.changed()
+                        && self.current_card_hash.as_deref() != Some(self.card_hash.trim())
+                    {
+                        self.current_card_texture = None;
+                        self.current_card_png = None;
+                        self.current_card_hash = None;
+                        self.current_card_backup_path = None;
+                    }
 
                     let scan_label = if self.scanning_syslog {
                         language.text("Stop")
@@ -1348,6 +1574,7 @@ impl AirCardApp {
                         .map(|c| format!("{} ({})", c.name, &c.hash[..8.min(c.hash.len())]))
                         .unwrap_or_else(|| language.text("Select...").into());
 
+                    let mut selected_hash = None;
                     egui::ComboBox::from_id_salt("saved_cards_box")
                         .width(combo_w)
                         .selected_text(egui::RichText::new(sel_label).color(md3::ON_SURFACE))
@@ -1359,10 +1586,52 @@ impl AirCardApp {
                                     .color(if is_selected { md3::ON_PRIMARY_CONTAINER } else { md3::ON_SURFACE })
                                     .strong();
                                 if ui.selectable_label(is_selected, text).clicked() {
-                                    self.card_hash = card.hash.clone();
+                                    selected_hash = Some(card.hash.clone());
                                 }
                             }
                         });
+                    if let Some(hash) = selected_hash {
+                        self.card_hash = hash;
+                        self.source_path = None;
+                        self.source_image = None;
+                        self.source_texture = None;
+                        self.crop_focus = [0.5, 0.5];
+                        self.crop_dirty = false;
+                        self.skin = None;
+                        self.current_card_texture = None;
+                        self.current_card_png = None;
+                        self.current_card_hash = None;
+                        self.current_card_backup_path = None;
+                        self.load_current_card_artwork(None);
+                    }
+                }
+
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new(language.text("Current Card Artwork")).strong().size(12.0).color(md3::ON_SURFACE));
+                ui.label(egui::RichText::new(language.text("Save the original artwork loaded from the iPhone as a PNG file.")).size(11.0).color(md3::ON_SURFACE_VARIANT));
+                ui.add_space(4.0);
+                let cached_current_card = self.current_card_hash.as_deref()
+                    == Some(self.card_hash.trim())
+                    && self.current_card_png.is_some();
+                let can_save_current = !self.is_busy
+                    && !self.card_hash.trim().is_empty()
+                    && (cached_current_card
+                        || (self.apple_ready && self.selected_transport_available()));
+                let save_current_btn = egui::Button::new(
+                    egui::RichText::new(language.text("Save Current Card PNG..."))
+                        .strong().size(12.0)
+                        .color(if can_save_current { md3::ON_PRIMARY_CONTAINER } else { md3::ON_SURFACE_VARIANT }),
+                )
+                .fill(if can_save_current { md3::PRIMARY_CONTAINER } else { md3::SURFACE_CONTAINER_HIGH })
+                .corner_radius(20).stroke(egui::Stroke::NONE)
+                .min_size(egui::vec2(ui.available_width(), 34.0));
+                let save_current_response = ui.add_enabled(can_save_current, save_current_btn);
+                if save_current_response.clicked() { self.save_current_card_png(); }
+                if !can_save_current {
+                    save_current_response.on_disabled_hover_text(language.text("Connect an iPhone and enter or scan a card hash first."));
+                }
+                if let Some(path) = self.current_card_backup_path.as_ref() {
+                    ui.label(egui::RichText::new(format!("{} {}", language.text("Saved to"), path.display())).size(10.5).color(md3::ON_SURFACE_VARIANT));
                 }
 
                 ui.add_space(16.0);
@@ -1453,6 +1722,13 @@ impl AirCardApp {
                 ui.label(egui::RichText::new(language.text("1536 x 969 px pass canvas")).size(12.0).color(md3::ON_SURFACE_VARIANT));
                 ui.add_space(12.0);
 
+                if self.source_texture.is_some() && self.current_card_texture.is_some() {
+                    if m3_button_tonal(ui, language.text("Reset to Original")) {
+                        self.reset_to_current_card();
+                    }
+                    ui.add_space(8.0);
+                }
+
                 let pass_w = (ui.available_width() - 8.0).clamp(250.0, 400.0);
                 let pass_h = pass_w * (969.0 / 1536.0);
                 ui.vertical_centered(|ui| {
@@ -1511,6 +1787,16 @@ impl AirCardApp {
                         painter.rect_stroke(rect, 16.0,
                             egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 30)),
                             egui::StrokeKind::Inside);
+                    } else if let Some(texture) = self.current_card_texture.as_ref() {
+                        painter.image(
+                            texture.id(),
+                            rect,
+                            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                        painter.rect_stroke(rect, 16.0,
+                            egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_premultiplied(255, 255, 255, 30)),
+                            egui::StrokeKind::Inside);
                     } else {
                         painter.rect_filled(rect, 16.0, md3::SURFACE_CONTAINER_HIGH);
                         painter.text(rect.center(), egui::Align2::CENTER_CENTER,
@@ -1525,7 +1811,9 @@ impl AirCardApp {
                     ui.label(egui::RichText::new("1.585 ratio").size(11.0).color(md3::ON_SURFACE_VARIANT));
                     ui.label(egui::RichText::new("|").size(11.0).color(md3::OUTLINE_VARIANT));
                     if self.skin.is_some() {
-                        ui.label(egui::RichText::new(language.text("Ready")).size(11.0).color(md3::SUCCESS));
+                        ui.label(egui::RichText::new(language.text("Replacement")).size(11.0).color(md3::SUCCESS));
+                    } else if self.current_card_texture.is_some() {
+                        ui.label(egui::RichText::new(language.text("Current card")).size(11.0).color(md3::SUCCESS));
                     } else {
                         ui.label(egui::RichText::new(language.text("No image")).size(11.0).color(md3::ON_SURFACE_VARIANT));
                     }

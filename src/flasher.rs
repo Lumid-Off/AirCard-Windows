@@ -20,6 +20,272 @@ pub const TARGET_WALLET_ASSETS: &[&str] = &[
     "cardBackgroundCombined.pdf",
 ];
 
+const TARGET_WALLET_PREVIEW_ASSETS: &[&str] = &[
+    "cardBackgroundCombined@3x.png",
+    "cardBackgroundCombined@2x.png",
+    "cardBackgroundCombined.pdf",
+];
+
+fn restore_system_file_in_session<L>(
+    udid: &str,
+    session: &ActiveDeviceSession,
+    afc: &AfcClient,
+    target_dir: &str,
+    leaf: &str,
+    payload: &[u8],
+    mut log: L,
+) -> Result<()>
+where
+    L: FnMut(&str),
+{
+    let token = generate_token();
+    let source = format!("{}{}", SOURCE_PREFIX, token);
+    let link_dest = format!("{}{}", LINK_PREFIX, token);
+    let link_ident = format!("../../{}/p0/p1/p2/link", source);
+    let payload_ident = format!("../../{}/payload", source);
+    let target_dest = format!("{}/{}", link_dest, leaf);
+    let archive = build_streaming_zip_archive(target_dir, payload)
+        .context("Failed to build card restoration archive")?;
+    let books = build_books_plist(&[link_ident.clone(), payload_ident.clone()])
+        .context("Failed to build Books.plist for card restoration")?;
+
+    let restore_res = (|| -> Result<()> {
+        stage_streaming_zip(session, &source, &archive)
+            .context("Failed to stage card restoration archive")?;
+        let link_obj = format!("{}/p0/p1/p2/link", source);
+        let payload_obj = format!("{}/payload", source);
+        if !afc.exists(&link_obj) || !afc.exists(&payload_obj) {
+            bail!("Card restoration archive is missing its link or payload");
+        }
+        afc.write_file("Books/Sync/Books.plist", &books)?;
+        sync_assets_via_airtraffic(
+            udid,
+            session.transport,
+            &[
+                (link_ident.as_str(), link_dest.as_str()),
+                (payload_ident.as_str(), target_dest.as_str()),
+            ],
+            &mut log,
+        )
+        .context("AirTraffic failed to restore the original card artwork")?;
+        if afc.exists(&payload_obj) {
+            bail!("AirTraffic did not consume the card restoration payload");
+        }
+        Ok(())
+    })();
+
+    let _ = afc.remove_path(&link_dest);
+    let _ = afc.remove_tree(&source);
+    restore_res
+}
+
+pub fn read_system_files<L>(
+    udid: &str,
+    connection_mode: ConnectionMode,
+    target_dir: &str,
+    leaves: &[&str],
+    mut log: L,
+) -> Result<Vec<(String, Vec<u8>)>>
+where
+    L: FnMut(&str),
+{
+    if leaves.is_empty() {
+        bail!("No system files were requested");
+    }
+    for leaf in leaves {
+        if leaf.is_empty() || leaf.contains('/') || leaf.contains('\\') {
+            bail!("Invalid system file name: {}", leaf);
+        }
+    }
+
+    let token = generate_token();
+
+    log(&format!(
+        "Connecting AFC to read {} current asset(s)...",
+        leaves.len()
+    ));
+    let session = ActiveDeviceSession::open(Some(udid), connection_mode)
+        .context("Failed to open device session for reading")?;
+    log(&format!("Connected over {}.", session.transport.label()));
+    let afc = AfcClient::new(&session).context("Failed to open AFC connection")?;
+    let snapshot = snapshot_books(&afc).context("Failed to snapshot Books state before reading")?;
+
+    let read_res = (|| -> Result<Vec<(String, Vec<u8>)>> {
+        afc.make_directory_recursive("Books/Sync")?;
+        let mut files = Vec::new();
+        let mut restore_failures = Vec::new();
+        for (index, leaf) in leaves.iter().enumerate() {
+            let target_path = format!("{}/{}", target_dir.trim_end_matches('/'), leaf);
+            let target_tail = target_path
+                .strip_prefix("/var/mobile/")
+                .context("Card artwork path is outside /var/mobile")?;
+            // AirTraffic resolves identifiers below /var/mobile/Media/Airlock/Book.
+            let target_ident = format!("../../../{}", target_tail);
+            let recovered = format!("{}{}-{}", RECOVERED_PREFIX, token, index);
+            let target_books = build_books_plist(std::slice::from_ref(&target_ident))
+                .context("Failed to build Books.plist for card export")?;
+            afc.write_file("Books/Sync/Books.plist", &target_books)?;
+
+            log(&format!(
+                "Exporting current {} into the AFC media area...",
+                leaf
+            ));
+            let export_result = sync_assets_via_airtraffic(
+                udid,
+                session.transport,
+                &[(target_ident.as_str(), recovered.as_str())],
+                &mut log,
+            );
+
+            let mut data = None;
+            for _ in 0..20 {
+                if let Ok(bytes) = afc.read_file(&recovered) {
+                    data = Some(bytes);
+                    break;
+                }
+                sleep(Duration::from_millis(250));
+            }
+
+            if !afc.exists(&recovered) {
+                match export_result {
+                    Ok(()) => log(&format!("Current {} is not present on this card.", leaf)),
+                    Err(err) => log(&format!("Current {} could not be exported: {}", leaf, err)),
+                }
+                continue;
+            }
+
+            if let Some(bytes) = data.as_ref() {
+                log(&format!("Read current {} ({} bytes).", leaf, bytes.len()));
+            } else {
+                log(&format!(
+                    "Current {} was exported but AFC could not read it.",
+                    leaf
+                ));
+            }
+
+            // Reading is indirect: move the known file into Media and read it
+            // with AFC. Restore it with a fresh link and payload in one sync;
+            // AirTraffic may discard links left over from an earlier session.
+            let Some(bytes) = data.as_ref() else {
+                restore_failures.push(format!("{} retained at AFC path {}", leaf, recovered));
+                continue;
+            };
+            let mut restored = false;
+            for attempt in 1..=2 {
+                let restore_result = restore_system_file_in_session(
+                    udid, &session, &afc, target_dir, leaf, bytes, &mut log,
+                );
+                if restore_result.is_ok() {
+                    restored = true;
+                    break;
+                }
+                log(&format!(
+                    "Restore attempt {} for {} did not complete.",
+                    attempt, leaf
+                ));
+            }
+
+            if !restored {
+                restore_failures.push(format!("{} retained at AFC path {}", leaf, recovered));
+                continue;
+            }
+            afc.remove_path(&recovered).context(
+                "Card artwork was restored, but its temporary Media copy could not be removed",
+            )?;
+            log(&format!(
+                "Restored current {} to its original card path.",
+                leaf
+            ));
+            if !bytes.is_empty() {
+                files.push(((*leaf).to_string(), bytes.clone()));
+            }
+        }
+
+        if !restore_failures.is_empty() {
+            bail!(
+                "Card artwork restoration failed; original files were preserved in Media: {}",
+                restore_failures.join("; ")
+            );
+        }
+        if files.is_empty() {
+            bail!("No current card artwork could be read from {}", target_dir);
+        }
+        Ok(files)
+    })();
+
+    sleep(Duration::from_millis(800));
+    let restore_res = restore_books(&afc, &snapshot);
+
+    match (read_res, restore_res) {
+        (Ok(files), Ok(())) => Ok(files),
+        (Err(read_err), Ok(())) => Err(read_err),
+        (Ok(_), Err(restore_err)) => {
+            Err(restore_err).context("Failed to restore Books state after reading card artwork")
+        }
+        (Err(read_err), Err(restore_err)) => bail!(
+            "{}; restoring Books state after the failed read also failed: {}",
+            read_err,
+            restore_err
+        ),
+    }
+}
+
+pub fn read_wallet_artwork<L>(
+    udid: &str,
+    connection_mode: ConnectionMode,
+    card_hash: &str,
+    mut log: L,
+) -> Result<(String, Vec<u8>)>
+where
+    L: FnMut(&str),
+{
+    anyhow::ensure!(
+        crate::scanner::is_valid_card_hash(card_hash),
+        "Invalid Wallet card path identifier"
+    );
+
+    let trimmed = card_hash.trim_end_matches('=');
+    let mut candidates = Vec::new();
+    for candidate in [
+        card_hash.to_string(),
+        trimmed.to_string(),
+        format!("{trimmed}="),
+        format!("{trimmed}=="),
+    ] {
+        if !candidate.is_empty() && !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+
+    let mut last_error = None;
+    for candidate in candidates {
+        let pkpass_dir = format!("/var/mobile/Library/Passes/Cards/{}.pkpass", candidate);
+        match read_system_files(
+            udid,
+            connection_mode,
+            &pkpass_dir,
+            TARGET_WALLET_PREVIEW_ASSETS,
+            &mut log,
+        ) {
+            Ok(assets) => {
+                if candidate != card_hash {
+                    log(&format!(
+                        "Using device Wallet card hash variant {} for artwork export.",
+                        candidate
+                    ));
+                }
+                return assets
+                    .into_iter()
+                    .next()
+                    .context("The current card has no PNG artwork");
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("No card hash candidates were available")))
+}
+
 #[allow(dead_code)]
 pub const CACHE_FILES: &[&str] = &[
     "FrontFace",
@@ -471,4 +737,21 @@ where
     progress(total_dirs, total_dirs, "Passcode theme applied successfully!");
     log("Passcode theme successfully written! Lock or reboot iPhone to see new keypad.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_reader_rejects_non_leaf_paths_before_connecting() {
+        let result = read_system_files(
+            "unused",
+            ConnectionMode::Auto,
+            "/unused",
+            &["../secret"],
+            |_| {},
+        );
+        assert!(result.unwrap_err().to_string().contains("Invalid system file name"));
+    }
 }
