@@ -34,7 +34,11 @@ pub fn get_cards_storage_path() -> PathBuf {
 }
 
 pub fn is_valid_card_hash(h: &str) -> bool {
-    let trimmed = h.trim_matches(['\'', '"']).trim_end_matches(['.', ',']);
+    let trimmed = h
+        .trim()
+        .trim_matches(['\'', '"'])
+        .trim_end_matches(['.', ','])
+        .trim();
     let len = trimmed.len();
     // Real Apple Wallet card hashes are SHA-1 (27-28 chars) or SHA-256 (43-44 chars)
     if len != 27 && len != 28 && len != 43 && len != 44 {
@@ -382,6 +386,9 @@ mod tests {
         assert!(is_valid_card_hash("OM6NYhwXMZrAw0sRUjR62wmF4ZQ="));
         assert!(is_valid_card_hash("d64fKk0kyHWP11IWV2GRLud4XQk="));
         assert!(is_valid_card_hash("d64fKk0kyHWP11IWV2GRLud4XQk"));
+        assert!(is_valid_card_hash("  OM6NYhwXMZrAw0sRUjR62wmF4ZQ=  "));
+        assert!(is_valid_card_hash("'OM6NYhwXMZrAw0sRUjR62wmF4ZQ=' "));
+        assert!(is_valid_card_hash(" \"OM6NYhwXMZrAw0sRUjR62wmF4ZQ=\", "));
 
         // System garbage strings that must be rejected
         let garbage = [
