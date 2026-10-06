@@ -46,11 +46,6 @@ pub fn is_valid_card_hash(h: &str) -> bool {
         return false;
     }
 
-    // Reject strings with multiple underscores or hyphens (typical of system asset/bundle names)
-    if trimmed.chars().filter(|&c| c == '_').count() > 1 || trimmed.chars().filter(|&c| c == '-').count() > 2 {
-        return false;
-    }
-
     // Reject obvious system identifiers, bundle IDs and common keywords
     let lower = trimmed.to_lowercase();
     if lower.contains("mobileasset")
@@ -382,6 +377,11 @@ mod tests {
         assert!(is_valid_card_hash("OM6NYhwXMZrAw0sRUjR62wmF4ZQ="));
         assert!(is_valid_card_hash("d64fKk0kyHWP11IWV2GRLud4XQk="));
         assert!(is_valid_card_hash("d64fKk0kyHWP11IWV2GRLud4XQk"));
+
+        // URL-safe base64 may contain several '-' or '_' characters; those alone
+        // must not reject a cryptographically valid SHA-1 card id (#33).
+        assert!(is_valid_card_hash("4FD0Y4djT-oIj--0Odq8GMLVpVo"));
+        assert!(is_valid_card_hash("99YLTeI09ke_k64JqGdQ_F4Ho7k"));
 
         // System garbage strings that must be rejected
         let garbage = [
