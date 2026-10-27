@@ -35,7 +35,8 @@
 
 ## Requirements
 - **Windows 10 / 11 (64-bit)**
-- **Apple Mobile Device Support / 64-bit iTunes** (required for Apple device communication).
+- **Apple Mobile Device Support / 64-bit iTunes** from [apple.com/itunes](https://www.apple.com/itunes/download/win64) (required for Apple device communication).
+  - The Microsoft Store **Apple Devices** app is **not** enough — Windows blocks third-party apps from loading its DLLs, so AirCard will show **No device** until classic Mobile Device Support is installed.
 - A Lightning or USB-C cable for the initial trust/pairing setup.
 - For WiFi mode, enable WiFi sync and keep the PC and iPhone on the same local network.
 

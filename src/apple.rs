@@ -16,6 +16,38 @@ const APPLE_SUPPORT_DIRS: &[&str] = &[
     r"C:\Program Files (x86)\Common Files\Apple\Mobile Device Support",
 ];
 
+fn dir_has_apple_libs(dir: &std::path::Path) -> bool {
+    dir.join("CoreFoundation.dll").is_file()
+        && dir.join("MobileDevice.dll").is_file()
+        && dir.join("AirTrafficHost.dll").is_file()
+}
+
+fn locate_store_apple_devices_dir() -> Option<PathBuf> {
+    // WindowsApps itself is not enumerable without admin, so resolve the
+    // Microsoft Store "Apple Devices" package via the per-user AppX registry.
+    const PACKAGES_KEY: &str = r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages";
+
+    let packages = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .open_subkey(PACKAGES_KEY)
+        .ok()?;
+
+    let mut candidates: Vec<PathBuf> = packages
+        .enum_keys()
+        .flatten()
+        .filter(|name| name.starts_with("AppleInc.AppleDevices_"))
+        .filter_map(|name| {
+            let key = packages.open_subkey(name).ok()?;
+            let root: String = key.get_value("PackageRootFolder").ok()?;
+            let dir = PathBuf::from(root);
+            dir_has_apple_libs(&dir).then_some(dir)
+        })
+        .collect();
+
+    // Prefer the newest package folder name (version is embedded in the path).
+    candidates.sort();
+    candidates.pop()
+}
+
 pub type CFTypeRef = *const std::ffi::c_void;
 pub type CFStringRef = *const std::ffi::c_void;
 pub type CFDataRef = *const std::ffi::c_void;
@@ -142,11 +174,8 @@ pub fn locate_support_dir() -> Option<PathBuf> {
     APPLE_SUPPORT_DIRS
         .iter()
         .map(PathBuf::from)
-        .find(|dir| {
-            dir.join("CoreFoundation.dll").is_file()
-                && dir.join("MobileDevice.dll").is_file()
-                && dir.join("AirTrafficHost.dll").is_file()
-        })
+        .find(|dir| dir_has_apple_libs(dir))
+        .or_else(locate_store_apple_devices_dir)
 }
 
 pub fn get_apple_libraries() -> Result<Arc<AppleLibraries>> {
@@ -155,7 +184,7 @@ pub fn get_apple_libraries() -> Result<Arc<AppleLibraries>> {
     }
 
     let dir = locate_support_dir().context(
-        "Apple Mobile Device Support was not found. Install 64-bit iTunes package from Apple.",
+        "Apple Mobile Device Support was not found. Install 64-bit iTunes from apple.com/itunes (not the Microsoft Store Apple Devices app).",
     )?;
 
     // Configure Windows DLL search directory so dependent DLLs (e.g. objc, pthread, SQLite) are resolved
@@ -167,11 +196,25 @@ pub fn get_apple_libraries() -> Result<Arc<AppleLibraries>> {
     let cf_path = dir.join("CoreFoundation.dll");
     let md_path = dir.join("MobileDevice.dll");
     let ath_path = dir.join("AirTrafficHost.dll");
+    let store_locked = dir
+        .to_string_lossy()
+        .contains(r"\WindowsApps\AppleInc.AppleDevices_");
+    let load_hint = if store_locked {
+        " Windows blocks loading DLLs from the Store 'Apple Devices' app. Install 64-bit iTunes from apple.com/itunes instead."
+    } else {
+        ""
+    };
 
     unsafe {
-        let cf_lib = Library::new(&cf_path).context("Failed to load CoreFoundation.dll")?;
-        let md_lib = Library::new(&md_path).context("Failed to load MobileDevice.dll")?;
-        let ath_lib = Library::new(&ath_path).context("Failed to load AirTrafficHost.dll")?;
+        let cf_lib = Library::new(&cf_path).with_context(|| {
+            format!("Failed to load CoreFoundation.dll.{load_hint}")
+        })?;
+        let md_lib = Library::new(&md_path).with_context(|| {
+            format!("Failed to load MobileDevice.dll.{load_hint}")
+        })?;
+        let ath_lib = Library::new(&ath_path).with_context(|| {
+            format!("Failed to load AirTrafficHost.dll.{load_hint}")
+        })?;
 
         macro_rules! load_sym {
             ($lib:expr, $name:expr) => {{
